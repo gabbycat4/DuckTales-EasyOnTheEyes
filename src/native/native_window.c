@@ -81,6 +81,7 @@
 #include "cyc_render.h"
 #include "cyc_settings.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -104,6 +105,103 @@
 #define STATE_VERSION 1u
 
 int ducktales_host_main(int argc, char **argv);
+
+/* ---- CYC_PACING_LOG=FILE: per frame, where the time went ----
+ * One line per shown frame, times in ms:
+ *   emu      native_run_frame + picture + sprite compositor + mods
+ *   audio    the synth's samples queued
+ *   wait     the hold until the frame's deadline
+ *   draw     show(): the presentation picture, texture upload, copy
+ *   present  SDL_RenderPresent
+ *   at       when the picture was handed over, from the frame's deadline
+ *   interval since the previous picture was handed over
+ * and a summary at exit (mean / p95 / max, and pictures that came more than
+ * 1.5 frame periods after the previous one). */
+#define PACE_MAX 200000
+static FILE *s_pace;
+static Uint64 s_split[4]; /* CYC_PACING_LOG: machine, picture, sprites, mods */
+static Uint64 s_pace_prev;
+static float *s_pace_emu, *s_pace_draw, *s_pace_int;
+static long s_pace_n;
+
+static void pace_open(void)
+{
+    const char *e = getenv("CYC_PACING_LOG");
+    if (!e || !*e) {
+        return;
+    }
+    s_pace = fopen(e, "w");
+    if (s_pace) {
+        s_pace_emu = (float *)calloc(PACE_MAX, sizeof(float));
+        s_pace_draw = (float *)calloc(PACE_MAX, sizeof(float));
+        s_pace_int = (float *)calloc(PACE_MAX, sizeof(float));
+        fprintf(s_pace, "# native player pacing log; frame period %.3f ms\n", 1000.0 / FRAME_HZ);
+    }
+}
+
+static void pace_line(long frame, double emu, double audio, double wait, double draw, double present, double at,
+                      double interval, bool vsync)
+{
+    if (!s_pace) {
+        return;
+    }
+    const double ms = 1000.0 / (double)SDL_GetPerformanceFrequency();
+    fprintf(s_pace,
+            "%ld frame: emu %.2f audio %.2f wait %.2f draw %.2f present %.2f at %+.2f interval %.2f vsync %d"
+            " | machine %.2f picture %.2f sprites %.2f mods %.2f\n",
+            frame, emu, audio, wait, draw, present, at, interval, (int)vsync, (double)s_split[0] * ms,
+            (double)s_split[1] * ms, (double)s_split[2] * ms, (double)s_split[3] * ms);
+    if (s_pace_emu && s_pace_n < PACE_MAX) {
+        s_pace_emu[s_pace_n] = (float)emu;
+        s_pace_draw[s_pace_n] = (float)draw;
+        s_pace_int[s_pace_n] = (float)interval;
+        s_pace_n++;
+    }
+}
+
+static int pace_cmp(const void *a, const void *b)
+{
+    float x = *(const float *)a, y = *(const float *)b;
+    return x < y ? -1 : x > y;
+}
+
+static void pace_stat(const char *name, float *v, long n)
+{
+    if (n <= 0) {
+        return;
+    }
+    double sum = 0, sq = 0;
+    for (long i = 0; i < n; i++) {
+        sum += v[i];
+        sq += (double)v[i] * v[i];
+    }
+    double mean = sum / n, sd = sq / n - mean * mean;
+    qsort(v, (size_t)n, sizeof *v, pace_cmp);
+    fprintf(s_pace, "# %-8s mean %.3f sd %.3f p50 %.3f p95 %.3f p99 %.3f max %.3f\n", name, mean, sd > 0 ? sqrt(sd) : 0,
+            v[n / 2], v[n * 95 / 100], v[n * 99 / 100], v[n - 1]);
+}
+
+static void pace_close(void)
+{
+    if (!s_pace) {
+        return;
+    }
+    long n = s_pace_n > 120 ? s_pace_n - 120 : 0, late = 0;
+    float *e = s_pace_emu + (s_pace_n - n), *d = s_pace_draw + (s_pace_n - n), *iv = s_pace_int + (s_pace_n - n);
+    const float period = (float)(1000.0 / FRAME_HZ);
+    for (long i = 0; i < n; i++) {
+        late += iv[i] > 1.5f * period;
+    }
+    fprintf(s_pace, "# summary over %ld frames (first 120 left out); late pictures (> 1.5 periods): %ld\n", n, late);
+    pace_stat("emu", e, n);
+    pace_stat("draw", d, n);
+    pace_stat("interval", iv, n);
+    fclose(s_pace);
+    s_pace = NULL;
+    free(s_pace_emu);
+    free(s_pace_draw);
+    free(s_pace_int);
+}
 
 void ducktales_host_apply_no_slowdown(bool on)
 {
@@ -149,14 +247,23 @@ static void run_frame(uint8_t pad0, uint8_t pad1)
     native_set_controller(0, pad0);
     native_set_controller(1, pad1);
     uint8_t mute = app_mods_audio_mute();
+    Uint64 t0 = SDL_GetPerformanceCounter();
     native_run_frame();
+    Uint64 t1 = SDL_GetPerformanceCounter();
     native_present_frame(native_last_frame());
+    Uint64 t2 = SDL_GetPerformanceCounter();
     dt_sprites_frame_end();
+    Uint64 t3 = SDL_GetPerformanceCounter();
     s_frame_mute = mute;
     if (app_mods_audio_active()) {
         app_mods_audio_frame_end(native_cpu_ram());
     }
     app_mods_scripts_frame();
+    Uint64 t4 = SDL_GetPerformanceCounter();
+    s_split[0] = t1 - t0;
+    s_split[1] = t2 - t1;
+    s_split[2] = t3 - t2;
+    s_split[3] = t4 - t3;
 }
 
 /* What the window shows (ui/app_present.h, or the plain picture) for a
@@ -753,6 +860,7 @@ static int run_window(bool hidden, bool uncapped, long exit_after, const char *p
     }
     open_pads();
     scheduling_begin();
+    pace_open();
 
     const Uint64 freq = SDL_GetPerformanceFrequency(), frame_ticks = (Uint64)((double)freq / FRAME_HZ);
     Uint64 next = SDL_GetPerformanceCounter(), shown = 0;
@@ -811,10 +919,13 @@ static int run_window(bool hidden, bool uncapped, long exit_after, const char *p
         uint8_t buttons[2] = { st.buttons[0], st.buttons[1] };
         app_ui_input(buttons);
         app_ui_frame_begin();
+        const Uint64 t_emu0 = SDL_GetPerformanceCounter();
         run_frame(buttons[0], buttons[1]);
         frames_done++;
         bool fast = st.shortcut[CYC_SC_FAST_FORWARD];
+        const Uint64 t_emu1 = SDL_GetPerformanceCounter();
         queue_audio(fast);
+        const Uint64 t_audio = SDL_GetPerformanceCounter();
 
         bool unpaced = fast || uncapped;
         set_vsync(s_set.vsync && !unpaced);
@@ -828,12 +939,23 @@ static int run_window(bool hidden, bool uncapped, long exit_after, const char *p
                 while (SDL_GetPerformanceCounter() < next) {
                 }
             }
+            const Uint64 t_draw0 = SDL_GetPerformanceCounter();
             show();
             if (present_out && present_every > 0 && loops % present_every == 0) {
                 present_shot(present_out, frames_done);
             }
+            const Uint64 t_draw1 = SDL_GetPerformanceCounter();
             SDL_RenderPresent(s_ren);
+            const Uint64 prev_shown = shown;
             shown = SDL_GetPerformanceCounter();
+            if (s_pace && !unpaced) {
+                const double ms = 1000.0 / (double)freq;
+                pace_line(frames_done, (double)(t_emu1 - t_emu0) * ms, (double)(t_audio - t_emu1) * ms,
+                          (double)(t_draw0 - t_audio) * ms, (double)(t_draw1 - t_draw0) * ms,
+                          (double)(shown - t_draw1) * ms, (double)((long long)(t_draw1 - next)) * ms,
+                          prev_shown ? (double)(t_draw1 - s_pace_prev) * ms : 0.0, s_vsync_active);
+            }
+            s_pace_prev = t_draw1;
         }
         loops++;
         next += frame_ticks;
@@ -845,6 +967,7 @@ static int run_window(bool hidden, bool uncapped, long exit_after, const char *p
             running = false;
         }
     }
+    pace_close();
     scheduling_end();
     app_ui_set_menu_tick(NULL);
     save_settings();
