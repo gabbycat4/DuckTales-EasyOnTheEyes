@@ -517,10 +517,10 @@ static void scan_entry(void *user, const char *name, bool folder)
         return;
     }
     char path[1024];
-    snprintf(path, sizeof path, "%s\\%s", ctx->dir, name);
+    snprintf(path, sizeof path, "%s" FM_SEP "%s", ctx->dir, name);
     if (folder) {
         char toml[1100];
-        snprintf(toml, sizeof toml, "%s\\mod.toml", path);
+        snprintf(toml, sizeof toml, "%s" FM_SEP "mod.toml", path);
         size_t n;
         uint8_t *probe = fm_read_file(toml, &n);
         if (!probe) {

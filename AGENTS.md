@@ -24,7 +24,8 @@ settings, presentation and enhancements. The goal is a polished PC port, not an 
   with a length/CRC-32 content key (see docs/architecture.md, "Adding a behaviour change").
 - Never open a visible window on the developer's desktop. Use the headless builds, `--hidden` or the
   self-test modes.
-- Windows x64 only. Do not add Linux or macOS build paths.
+- This fork (gabbycat4, branch linux-240) builds on Windows x64 and Linux (CachyOS). Keep Linux
+  changes small, behind `#ifdef _WIN32` / `#else`, and never change the Windows behaviour.
 - Do not push to `main` or merge without being asked.
 
 ## Environment

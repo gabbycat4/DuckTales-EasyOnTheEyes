@@ -203,6 +203,6 @@ void fm_nes_dump_tile(const uint8_t *chr, bool sprite, uint64_t hash, uint32_t p
         }
     }
     char path[1200];
-    snprintf(path, sizeof path, "%s\\%016llx_%08x.png", s_dump_dir, (unsigned long long)hash, palette);
+    snprintf(path, sizeof path, "%s" FM_SEP "%016llx_%08x.png", s_dump_dir, (unsigned long long)hash, palette);
     fm_png_write(path, px, 8, 8);
 }

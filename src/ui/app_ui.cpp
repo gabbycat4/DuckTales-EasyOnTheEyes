@@ -80,12 +80,44 @@ float ui_base(SDL_Window *win, int out_h)
     return ui::base_size(out_h, ddpi);
 }
 
+/* formae-ui's Linux default is Debian's DejaVu path; other distributions
+ * (Arch/CachyOS, Fedora) keep their fonts elsewhere. */
+static ui::FontFiles menu_fonts()
+{
+    ui::FontFiles f = ui::system_font_files();
+#if !defined(_WIN32) && !defined(__APPLE__)
+    static const char *const PAIRS[][2] = {
+        { "/usr/share/fonts/noto/NotoSans-Regular.ttf", "/usr/share/fonts/noto/NotoSans-SemiBold.ttf" },
+        { "/usr/share/fonts/TTF/DejaVuSans.ttf", "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf" },
+        { "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" },
+        { "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf", "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans-Bold.ttf" },
+        { "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf", "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf" },
+    };
+    for (const auto &pair : PAIRS) {
+        FILE *a = std::fopen(pair[0], "rb"), *b = std::fopen(pair[1], "rb");
+        bool ok = a && b;
+        if (a) {
+            std::fclose(a);
+        }
+        if (b) {
+            std::fclose(b);
+        }
+        if (ok) {
+            f.regular = pair[0];
+            f.semibold = pair[1];
+            break;
+        }
+    }
+#endif
+    return f;
+}
+
 struct Imgui {
     std::unique_ptr<ui::Context> ctx;
 
     bool begin(SDL_Window *w, SDL_Renderer *r)
     {
-        ctx = std::make_unique<ui::Context>();
+        ctx = std::make_unique<ui::Context>(ui::Theme(), menu_fonts());
         if (!ImGui_ImplSDL2_InitForSDLRenderer(w, r)) {
             ctx.reset();
             return false;
@@ -802,9 +834,33 @@ std::string pick_file(SDL_Window *win)
     return out;
 }
 #else
+std::string run_picker(const char *command)
+{
+    FILE *p = popen(command, "r");
+    if (!p) {
+        return std::string();
+    }
+    std::string out;
+    char buf[1024];
+    while (std::fgets(buf, sizeof buf, p)) {
+        out += buf;
+    }
+    if (pclose(p) != 0) {
+        return std::string();
+    }
+    while (!out.empty() && (out.back() == '\n' || out.back() == '\r')) {
+        out.pop_back();
+    }
+    return out;
+}
+
 std::string pick_file(SDL_Window *)
 {
-    return std::string();
+    return run_picker("if command -v kdialog >/dev/null 2>&1; then "
+                      "kdialog --title 'Choose your DuckTales (USA) ROM' --getopenfilename \"$HOME\" 'NES ROM (*.nes)'; "
+                      "elif command -v zenity >/dev/null 2>&1; then "
+                      "zenity --file-selection --title='Choose your DuckTales (USA) ROM' "
+                      "--file-filter='NES ROM | *.nes' --file-filter='All files | *'; fi 2>/dev/null");
 }
 #endif
 

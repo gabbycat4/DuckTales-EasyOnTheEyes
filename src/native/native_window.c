@@ -84,6 +84,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef _WIN32
+#include <sys/stat.h>
+#include <sys/types.h>
+#endif
 #ifdef _WIN32
 #include <direct.h>
 #include <windows.h>
@@ -370,6 +374,8 @@ static void state_path(char *out, size_t cap)
     }
 #ifdef _WIN32
     _mkdir(dir);
+#else
+    mkdir(dir, 0755);
 #endif
     snprintf(out, cap, "%s/DuckTales.native-state", dir);
 }

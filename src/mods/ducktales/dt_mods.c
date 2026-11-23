@@ -300,7 +300,7 @@ static void configure(void)
         events[e] = (FmEvent){ Events_Name((EventId)e), Events_Cancelable((EventId)e) };
     }
     if (app_data_dir(s_store_dir, sizeof s_store_dir - 16)) {
-        strcat(s_store_dir, "\\mods-data");
+        strcat(s_store_dir, FM_SEP "mods-data");
     }
     FmScriptGame script = { events,       EVENT_COUNT, FIELDS,        (int)(sizeof FIELDS / sizeof FIELDS[0]),
                             GameRam_Open, listen,      GameRam_Begin, GameRam_End,
@@ -356,7 +356,7 @@ void app_mods_use_player_folders(const char *config_path)
         fm_read_config(config_path);
     }
     if (app_data_dir(dir, sizeof dir - 8)) {
-        strcat(dir, "\\mods");
+        strcat(dir, FM_SEP "mods");
         fm_put_folder_first(dir);
     }
 }

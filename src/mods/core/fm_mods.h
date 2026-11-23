@@ -26,6 +26,18 @@ extern "C" {
 
 #define FM_MAX_MODS 256
 
+/* Path separator and case-insensitive compares: Windows' own, or POSIX. */
+#ifdef _WIN32
+#define FM_SEP      "\\"
+#define FM_SEP_CHAR '\\'
+#else
+#include <strings.h>
+#define FM_SEP      "/"
+#define FM_SEP_CHAR '/'
+#define _stricmp    strcasecmp
+#define _strnicmp   strncasecmp
+#endif
+
 /* ---- the game ---- */
 
 typedef struct {

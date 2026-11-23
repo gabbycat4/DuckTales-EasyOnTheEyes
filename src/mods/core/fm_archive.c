@@ -8,6 +8,9 @@
  * mod folder), that folder is the mod's root. Paths are UTF-8; Windows
  * gets them through the wide calls.
  */
+#if !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
+#define _POSIX_C_SOURCE 200809L
+#endif
 #include "mods/core/fm_mods.h"
 
 #include <stdio.h>
@@ -18,6 +21,12 @@
 #include <direct.h>
 #include <io.h>
 #include <windows.h>
+#else
+#include <dirent.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#define _fseeki64 fseeko
+#define _ftelli64 ftello
 #endif
 
 #define ZIP_EOCD     0x06054b50u
@@ -131,6 +140,40 @@ void fm_list_dir(const char *dir, void (*fn)(void *user, const char *name, bool 
     } while (FindNextFileW(h, &fd));
     FindClose(h);
 }
+#else
+static FILE *open_utf8(const char *path, const char *mode)
+{
+    return fopen(path, mode);
+}
+
+bool fm_is_dir(const char *path)
+{
+    struct stat st;
+    return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+bool fm_make_dir(const char *path)
+{
+    return fm_is_dir(path) || mkdir(path, 0755) == 0;
+}
+
+void fm_list_dir(const char *dir, void (*fn)(void *user, const char *name, bool folder), void *user)
+{
+    DIR *d = opendir(dir);
+    if (!d) {
+        return;
+    }
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) {
+            continue;
+        }
+        char path[1400];
+        snprintf(path, sizeof path, "%s/%s", dir, e->d_name);
+        fn(user, e->d_name, fm_is_dir(path));
+    }
+    closedir(d);
+}
 #endif
 
 uint8_t *fm_read_file(const char *path, size_t *size)
@@ -179,7 +222,7 @@ static void walk_folder(void *user, const char *name, bool folder);
 static void walk(FmArchive *a, const char *base, int depth)
 {
     char dir[1400];
-    snprintf(dir, sizeof dir, "%s%s%s", a->root, base[0] ? "\\" : "", base);
+    snprintf(dir, sizeof dir, "%s%s%s", a->root, base[0] ? FM_SEP : "", base);
     Walk w = { a, "", depth };
     snprintf(w.base, sizeof w.base, "%s", base);
     fm_list_dir(dir, walk_folder, &w);
@@ -362,10 +405,10 @@ uint8_t *fm_archive_read(const FmArchive *a, int index, size_t *size, char *err,
     const FmEntry *e = &a->entries[index];
     if (a->folder) {
         char path[1400];
-        snprintf(path, sizeof path, "%s\\%s", a->root, e->name);
+        snprintf(path, sizeof path, "%s" FM_SEP "%s", a->root, e->name);
         for (char *c = path + strlen(a->root); *c; c++) {
             if (*c == '/') {
-                *c = '\\';
+                *c = FM_SEP_CHAR;
             }
         }
         uint8_t *data = fm_read_file(path, size);
