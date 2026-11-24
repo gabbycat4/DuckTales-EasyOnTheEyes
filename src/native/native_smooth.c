@@ -21,7 +21,13 @@
  * every other frame (+8, 0, +8, 0: pacing240s3.log). The playfield's Y and
  * Scrooge's are shown as the average of the last two frames' positions,
  * stepped evenly between frames: 4 lines a frame, one a picture at 240,
- * starting and stopping in half steps.
+ * starting and stopping in half steps. With soft screen changes
+ * (smooth_set_soft_screen_changes) the playfield's Y follows the same kind of
+ * filter as the camera instead (average of 4 frames, spring T 2): the same
+ * speed in the middle, easing in and out at the ends, trailing up to 26
+ * lines (offline: +8,0,+8,0 x 30, no jolts). Scrooge is followed in the
+ * scrolling playfield's coordinates (his Y plus the playfield's), so while
+ * the screen carries him he moves exactly with it.
  *
  * Objects (enemies, items, shots: character glide). Each object the
  * compositor draws apart is followed by its slot: the average of its last
@@ -70,7 +76,9 @@ static struct {
     Ease camera;
     bool player;
     int px, py, pdy;
-    double pyprev, pyavg0, pyavg1;
+    double pyprev, pyavg0, pyavg1;  /* Scrooge's Y in the playfield: py + yc */
+    bool soft;
+    Ease yease;
     double pworld;
     Ease walk;
     bool margins_ready;
@@ -88,7 +96,14 @@ static void ease_reset(Ease *e, double at)
     }
 }
 
+static void ease_step_with(Ease *e, double to, int N, double T, double lag);
+
 static void ease_step(Ease *e, double to, int level)
+{
+    ease_step_with(e, to, LEVEL_N[level], LEVEL_T[level], SMOOTH_MARGIN - 2);
+}
+
+static void ease_step_with(Ease *e, double to, int N, double T, double lag)
 {
     e->cam = to;
     e->hist[e->head] = to;
@@ -96,12 +111,12 @@ static void ease_step(Ease *e, double to, int level)
     if (e->n < HIST) {
         e->n++;
     }
-    const int N = LEVEL_N[level], m = e->n < N ? e->n : N;
+    const int m = e->n < N ? e->n : N;
     double sum = 0;
     for (int k = 0; k < m; k++) {
         sum += e->hist[(e->head - 1 - k + HIST) % HIST];
     }
-    const double target = sum / m, w = 1.0 / LEVEL_T[level], h = 1.0 / SUB;
+    const double target = sum / m, w = 1.0 / T, h = 1.0 / SUB;
     e->sub[0] = e->x;
     for (int k = 1; k <= SUB; k++) {
         double acc = w * w * (target - e->x) - 2 * w * e->v;
@@ -109,7 +124,6 @@ static void ease_step(Ease *e, double to, int level)
         e->x += e->v * h;
         e->sub[k] = e->x;
     }
-    const double lag = SMOOTH_MARGIN - 2;
     double d = e->cam - e->x, fix = d > lag ? d - lag : d < -lag ? d + lag : 0;
     if (fix != 0) {
         e->x += fix;
@@ -161,7 +175,7 @@ static void player_restart(int px, int py)
     s.px = px;
     s.py = py;
     s.pdy = 0;
-    s.pyprev = s.pyavg0 = s.pyavg1 = py;
+    s.pyprev = s.pyavg0 = s.pyavg1 = py + s.yc;
     s.pworld = s.camera.cam + px;
     ease_reset(&s.walk, s.pworld);
 }
@@ -195,6 +209,7 @@ void smooth_frame(bool have, int scrooge_x, int scrooge_y)
         s.last_y = y;
         s.vdx = s.vdy = 0;
         s.yc = s.yprev = s.yavg0 = s.yavg1 = y;
+        ease_reset(&s.yease, y);
         ease_reset(&s.camera, x);
         s.player = on && have;
         if (s.player) {
@@ -211,6 +226,7 @@ void smooth_frame(bool have, int scrooge_x, int scrooge_y)
     s.yc += dy;
     s.yavg0 = s.yavg1;
     s.yavg1 = (s.yc + s.yprev) / 2;
+    ease_step_with(&s.yease, s.yc, 4, 2.0, SMOOTH_MARGIN_Y - 2);
     ease_step(&s.camera, s.camera.cam + dx, s.level);
 
     if (!have) {
@@ -225,7 +241,8 @@ void smooth_frame(bool have, int scrooge_x, int scrooge_y)
             s.pdy = pdy;
             s.px = scrooge_x;
             s.pyavg0 = s.pyavg1;
-            s.pyavg1 = (scrooge_y + s.py) / 2.0;
+            s.pyavg1 = (scrooge_y + s.yc + s.pyprev) / 2.0;
+            s.pyprev = scrooge_y + s.yc;
             s.py = scrooge_y;
             s.pworld = world;
             ease_step(&s.walk, world, s.level);
@@ -240,7 +257,32 @@ void smooth_frame(bool have, int scrooge_x, int scrooge_y)
         s.yprev -= base;
         s.yavg0 -= base;
         s.yavg1 -= base;
+        s.pyprev -= base;
+        s.pyavg0 -= base;
+        s.pyavg1 -= base;
+        s.yease.cam -= base;
+        s.yease.x -= base;
+        for (int k = 0; k <= SUB; k++) {
+            s.yease.sub[k] -= base;
+        }
+        for (int k = 0; k < HIST; k++) {
+            s.yease.hist[k] -= base;
+        }
     }
+}
+
+/* The playfield's Y as shown at phase p. */
+static double shown_y(double p, bool in_between)
+{
+    if (s.soft) {
+        return ease_at(&s.yease, p, in_between);
+    }
+    return in_between ? s.yavg0 + (s.yavg1 - s.yavg0) * p : s.yavg1;
+}
+
+void smooth_set_soft_screen_changes(bool on)
+{
+    s.soft = on;
 }
 
 bool smooth_active(int *band)
@@ -259,8 +301,7 @@ void smooth_shift(double p, bool in_between, double *dx, double *dy)
         return;
     }
     *dx = s.camera.cam - ease_at(&s.camera, p, in_between);
-    const double shown = in_between ? s.yavg0 + (s.yavg1 - s.yavg0) * p : s.yavg1;
-    *dy = s.yc - shown;
+    *dy = s.yc - shown_y(p, in_between);
 }
 
 bool smooth_scrooge_shift(double p, bool in_between, double *dx, double *dy)
@@ -273,8 +314,10 @@ bool smooth_scrooge_shift(double p, bool in_between, double *dx, double *dy)
      * at his world X less the game's camera. */
     double shown = ease_at(&s.walk, p, in_between) - ease_at(&s.camera, p, in_between);
     *dx = shown - (s.pworld - s.camera.cam);
-    const double shown_y = in_between ? s.pyavg0 + (s.pyavg1 - s.pyavg0) * p : s.pyavg1;
-    *dy = shown_y - s.py;
+    /* In the playfield's coordinates: his place there, less where the
+     * playfield is shown, against where the game drew him. */
+    const double in_field = in_between ? s.pyavg0 + (s.pyavg1 - s.pyavg0) * p : s.pyavg1;
+    *dy = (in_field - shown_y(p, in_between)) - s.py;
     return true;
 }
 
@@ -293,7 +336,7 @@ void smooth_margins(const uint32_t **left, const uint32_t **right, const uint32_
         if (lo < -0.001) {
             native_present_shifted_background(s.band, SMOOTH_MARGIN, 0, s_right);
         }
-        double ya = s.yc - s.yavg0, yb = s.yc - s.yavg1;
+        double ya = s.yc - shown_y(0, true), yb = s.yc - shown_y(1, true);
         if (ya > 0.001 || yb > 0.001) {
             native_present_shifted_background(s.band, 0, -SMOOTH_MARGIN_Y, s_up);
         }

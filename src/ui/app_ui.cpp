@@ -206,6 +206,7 @@ void page_graphics(SDL_Window *win)
     static const char *const PACING[] = { "Auto", "VSync", "Steady" };
     static const char *const RATES[] = { "60", "120", "180", "240" };
     static const char *const SMOOTH[] = { "Off", "Calm", "Calmer", "Slowest" };
+    static const char *const SCREENS[] = { "Even", "Soft" };
     AppDisplay d;
     app_display_get(&d);
     const AppDisplay was = d;
@@ -249,6 +250,12 @@ void page_graphics(SDL_Window *win)
               "at once. Calm follows closely; Calmer and Slowest are gentler and trail a little further behind "
               "Scrooge. Works with Nearest pixels and Square aspect; best with more pictures per second. Changes "
               "only the picture.");
+    ImGui::BeginDisabled(d.smooth == APP_SMOOTH_OFF);
+    ui::combo("Screen changes", &d.soft_screens, SCREENS, 2, nullptr,
+              "How the screen moves up or down to the next area. Even moves it at one steady speed from start to "
+              "stop. Soft eases it in and out: the same speed in the middle, gentler at both ends, settling a "
+              "moment after the game has moved on.");
+    ImGui::EndDisabled();
     if (std::memcmp(&d, &was, sizeof d)) {
         app_display_set(win, &d);
     }

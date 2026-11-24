@@ -25,6 +25,7 @@ typedef struct {
     int pacing;        /* AppPacing; applies at the next launch */
     int rate;          /* AppRate: pictures a second */
     int smooth;        /* AppSmooth */
+    int soft_screens;  /* 0 even, 1 soft */
     int volume;        /* 0..100 */
 } AppDisplay;
 

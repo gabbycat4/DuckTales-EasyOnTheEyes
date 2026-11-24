@@ -17,11 +17,15 @@ extern "C" {
  * (it never trails the game's camera by more than SMOOTH_MARGIN - 2), and
  * lines above and below it for the vertical steps. */
 #define SMOOTH_MARGIN   32
-#define SMOOTH_MARGIN_Y 16
+#define SMOOTH_MARGIN_Y 32
 
 /* [Game] SmoothScrolling (app_present.h AppSmooth): 0 off, 1 calm, 2 calmer,
  * 3 slowest. */
 void smooth_set_level(int level);
+
+/* [Game] ScreenChanges: soft eases the vertical screen changes in and out
+ * (on), even moves them at one steady speed from start to stop. */
+void smooth_set_soft_screen_changes(bool on);
 
 /* After each machine frame (native_present_frame): follow the playfield's
  * position, and Scrooge's on-screen position (have: his layer exists). */

@@ -76,6 +76,7 @@ typedef struct {
     int aspect;      /* AppAspect */
     int rate;        /* AppRate: pictures a second; above 60 the steady hold is used, VSync off */
     int smooth;      /* AppSmooth: eased playfield camera (native player, nearest square pixels) */
+    int soft_screens; /* bool: the vertical screen changes ease in and out (else one steady speed) */
 } AppPresentation;
 
 /* Pictures a second for an AppRate: 60, 120, 180 or 240. */

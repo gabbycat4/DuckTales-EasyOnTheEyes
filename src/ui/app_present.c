@@ -38,7 +38,7 @@
 #include <string.h>
 
 static AppPresentation s_p = { APP_PACING_AUTO, 1, APP_OVERSCAN_OFF, APP_PIXELS_NEAREST, APP_ASPECT_SQUARE, APP_RATE_60,
-                                APP_SMOOTH_CALM };
+                                APP_SMOOTH_CALM, 1 };
 
 static const char *const PACING[] = { "auto", "vsync", "steady" };
 static const char *const SPLIT[] = { "original", "clean" };
@@ -47,6 +47,7 @@ static const char *const PIXELS[] = { "nearest", "sharp", "smooth" };
 static const char *const ASPECT[] = { "square", "8:7" };
 static const char *const RATE[] = { "60", "120", "180", "240" };
 static const char *const SMOOTH[] = { "off", "calm", "calmer", "slowest" };
+static const char *const SCREENS[] = { "even", "soft" };
 
 static const struct {
     const char *key;
@@ -61,6 +62,7 @@ static const struct {
     { "PixelAspect", ASPECT, APP_ASPECT_COUNT, offsetof(AppPresentation, aspect) },
     { "PicturesPerSecond", RATE, APP_RATE_COUNT, offsetof(AppPresentation, rate) },
     { "SmoothScrolling", SMOOTH, APP_SMOOTH_COUNT, offsetof(AppPresentation, smooth) },
+    { "ScreenChanges", SCREENS, 2, offsetof(AppPresentation, soft_screens) },
 };
 
 #define KEY_COUNT (sizeof KEYS / sizeof KEYS[0])

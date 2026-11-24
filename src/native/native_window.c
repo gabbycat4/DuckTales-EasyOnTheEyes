@@ -935,13 +935,18 @@ static bool smooth_layers(const uint32_t *pic, int w, int h, long frame, int *ba
         for (int r = -MY; r < fh + MY; r++) {
             uint32_t *row = s_field_px + (size_t)(r + MY) * W;
             const int sy = band + r, content = ((cy + sy) % 240 + 240) % 240;
-            if (r < 0 || r >= fh) {
-                if (cache && s_row_frame[content] >= frame - 8 && s_row_frame[content] < frame &&
+            /* The playfield's first line is the HUD split's broken line, drawn
+             * in the backdrop colour (HUD split line: clean). While the
+             * screen moves vertically the playfield is drawn lower, so that
+             * line would cross the picture as a black band (Nov 24): it is
+             * drawn from the playfield above then. */
+            if (r < 0 || r >= fh || (r == 0 && moving)) {
+                if (r != 0 && cache && s_row_frame[content] >= frame - 16 && s_row_frame[content] < frame &&
                     s_row_x[content] == cam_x) {
                     memcpy(row, s_rows[content], (size_t)W * sizeof *row);
                     continue;
                 }
-                const uint32_t *v = r < 0 ? up + (size_t)(sy + MY) * 256 : down + (size_t)(sy - MY) * 256;
+                const uint32_t *v = r <= 0 ? up + (size_t)(sy + MY) * 256 : down + (size_t)(sy - MY) * 256;
                 for (int e = 0; e < W; e++) {
                     int c = side - M + e;
                     row[e] = v[c < 0 ? 0 : c > 255 ? 255 : c];
@@ -950,7 +955,7 @@ static bool smooth_layers(const uint32_t *pic, int w, int h, long frame, int *ba
             }
             const uint32_t *src = pic + (size_t)(bp + r) * w;
             if (moving && cache && r > 0 && (r <= EDGE_ROWS || r >= fh - EDGE_ROWS) &&
-                s_row_frame[content] >= frame - 8 && s_row_frame[content] < frame && s_row_x[content] == cam_x) {
+                s_row_frame[content] >= frame - 16 && s_row_frame[content] < frame && s_row_x[content] == cam_x) {
                 memcpy(row, s_rows[content], (size_t)W * sizeof *row);
                 continue;
             }
@@ -1365,6 +1370,7 @@ static void frame_finish(const WorkResult *r)
     const double ms = 1000.0 / (double)SDL_GetPerformanceFrequency();
     const Uint64 t0 = SDL_GetPerformanceCounter();
     smooth_set_level(r->pres.smooth);
+    smooth_set_soft_screen_changes(r->pres.soft_screens != 0);
     scrooge_apart(r->pres.smooth != APP_SMOOTH_OFF && r->pres.pixels == APP_PIXELS_NEAREST &&
                   r->pres.aspect == APP_ASPECT_SQUARE);
     const Uint64 t1 = SDL_GetPerformanceCounter();
