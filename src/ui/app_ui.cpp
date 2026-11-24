@@ -205,6 +205,7 @@ void page_graphics(SDL_Window *win)
     static const char *const SPLIT[] = { "Original", "Clean" };
     static const char *const PACING[] = { "Auto", "VSync", "Steady" };
     static const char *const RATES[] = { "60", "120", "180", "240" };
+    static const char *const SMOOTH[] = { "Off", "Calm", "Calmer", "Slowest" };
     AppDisplay d;
     app_display_get(&d);
     const AppDisplay was = d;
@@ -243,6 +244,11 @@ void page_graphics(SDL_Window *win)
               "displays (choose your display's refresh rate or a divisor of it). Above 60 the picture is held "
               "steady without VSync. At 240 the game runs at 59.94 frames a second (0.26% slower) so the "
               "pictures fit a 240 Hz display.");
+    ui::combo("Smooth scrolling", &d.smooth, SMOOTH, APP_SMOOTH_COUNT, nullptr,
+              "Eases the camera so the level glides instead of stepping 1 and 2 pixels and starting and stopping "
+              "at once. Calm follows closely; Calmer and Slowest are gentler and trail a little further behind "
+              "Scrooge. Works with Nearest pixels and Square aspect; best with more pictures per second. Changes "
+              "only the picture.");
     if (std::memcmp(&d, &was, sizeof d)) {
         app_display_set(win, &d);
     }

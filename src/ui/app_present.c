@@ -37,7 +37,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-static AppPresentation s_p = { APP_PACING_AUTO, 1, APP_OVERSCAN_OFF, APP_PIXELS_NEAREST, APP_ASPECT_SQUARE, APP_RATE_60 };
+static AppPresentation s_p = { APP_PACING_AUTO, 1, APP_OVERSCAN_OFF, APP_PIXELS_NEAREST, APP_ASPECT_SQUARE, APP_RATE_60,
+                                APP_SMOOTH_CALM };
 
 static const char *const PACING[] = { "auto", "vsync", "steady" };
 static const char *const SPLIT[] = { "original", "clean" };
@@ -45,6 +46,7 @@ static const char *const OVERSCAN[] = { "off", "top-bottom", "all" };
 static const char *const PIXELS[] = { "nearest", "sharp", "smooth" };
 static const char *const ASPECT[] = { "square", "8:7" };
 static const char *const RATE[] = { "60", "120", "180", "240" };
+static const char *const SMOOTH[] = { "off", "calm", "calmer", "slowest" };
 
 static const struct {
     const char *key;
@@ -58,6 +60,7 @@ static const struct {
     { "Pixels", PIXELS, APP_PIXELS_COUNT, offsetof(AppPresentation, pixels) },
     { "PixelAspect", ASPECT, APP_ASPECT_COUNT, offsetof(AppPresentation, aspect) },
     { "PicturesPerSecond", RATE, APP_RATE_COUNT, offsetof(AppPresentation, rate) },
+    { "SmoothScrolling", SMOOTH, APP_SMOOTH_COUNT, offsetof(AppPresentation, smooth) },
 };
 
 #define KEY_COUNT (sizeof KEYS / sizeof KEYS[0])

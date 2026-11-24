@@ -60,6 +60,14 @@ typedef enum {
     APP_RATE_COUNT
 } AppRate;
 
+typedef enum {
+    APP_SMOOTH_OFF,
+    APP_SMOOTH_CALM,
+    APP_SMOOTH_CALMER,
+    APP_SMOOTH_SLOWEST,
+    APP_SMOOTH_COUNT
+} AppSmooth;
+
 typedef struct {
     int pacing;      /* AppPacing; applies at the next launch */
     int clean_split; /* bool */
@@ -67,6 +75,7 @@ typedef struct {
     int pixels;      /* AppPixels */
     int aspect;      /* AppAspect */
     int rate;        /* AppRate: pictures a second; above 60 the steady hold is used, VSync off */
+    int smooth;      /* AppSmooth: eased playfield camera (native player, nearest square pixels) */
 } AppPresentation;
 
 /* Pictures a second for an AppRate: 60, 120, 180 or 240. */

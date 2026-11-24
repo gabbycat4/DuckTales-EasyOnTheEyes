@@ -62,6 +62,7 @@
 #include <SDL.h>
 
 #include "native/native_present.h"
+#include "native/native_smooth.h"
 #include "native/native_route.h"
 #include "native/native_runtime.h"
 #include "native/native_state.h"
@@ -125,6 +126,10 @@ static long s_pace_pic_n, s_pace_skipped;
 static double s_pace_step_ms;
 static Uint64 s_pace_first, s_pace_last;
 static Uint64 s_split[4]; /* CYC_PACING_LOG: machine, picture, sprites, mods */
+static double s_prep_ms; /* defined with smooth_prepare */
+static double s_fin_ms[4]; /* frame_finish: apart, Scrooge's layer, easing, total */
+static double s_work_at[2]; /* the frame's work: start and end, ms from the previous frame's deadline */
+static bool s_player_ok;
 static Uint64 s_pace_prev;
 static float *s_pace_emu, *s_pace_draw, *s_pace_int;
 static long s_pace_n;
@@ -154,9 +159,22 @@ static void pace_line(long frame, double emu, double audio, double wait, double 
     const double ms = 1000.0 / (double)SDL_GetPerformanceFrequency();
     fprintf(s_pace,
             "%ld frame: emu %.2f audio %.2f wait %.2f draw %.2f present %.2f at %+.2f interval %.2f vsync %d"
-            " | machine %.2f picture %.2f sprites %.2f mods %.2f\n",
+            " | machine %.2f picture %.2f sprites %.2f mods %.2f prep %.2f | finish apart %.2f layer %.2f ease %.2f"
+            " total %.2f | work at %+.2f..%+.2f",
             frame, emu, audio, wait, draw, present, at, interval, (int)vsync, (double)s_split[0] * ms,
-            (double)s_split[1] * ms, (double)s_split[2] * ms, (double)s_split[3] * ms);
+            (double)s_split[1] * ms, (double)s_split[2] * ms, (double)s_split[3] * ms, s_prep_ms, s_fin_ms[0],
+            s_fin_ms[1], s_fin_ms[2], s_fin_ms[3], s_work_at[0], s_work_at[1]);
+    bool on;
+    int sx, sy, sdx, sdy;
+    double sh0, sh1;
+    smooth_debug(&on, &sx, &sy, &sdx, &sdy, &sh0, &sh1);
+    if (on) {
+        fprintf(s_pace, " | smooth x %d y %d dx %+d dy %+d shift %+.2f..%+.2f scrooge %d", sx, sy, sdx, sdy, sh0, sh1,
+                (int)s_player_ok);
+    } else {
+        fprintf(s_pace, " | smooth off");
+    }
+    fputc('\n', s_pace);
     if (s_pace_emu && s_pace_n < PACE_MAX) {
         s_pace_emu[s_pace_n] = (float)emu;
         s_pace_draw[s_pace_n] = (float)draw;
@@ -707,8 +725,264 @@ static void apply_fullscreen(void)
     }
 }
 
+/* ---- smooth scrolling (native_smooth.h) ----
+ * Three layers a picture, built once a frame: the HUD rows as they are; the
+ * playfield with SMOOTH_MARGIN columns more on each side and SMOOTH_MARGIN_Y
+ * lines more above and below, moved by the eased camera; and Scrooge alone
+ * (host/ducktales_sprites.h), moved by his own easing. The GPU places them
+ * between pixels at the display's resolution. Only for nearest, square
+ * pixels with No sprite flicker on: the other modes are resampled on the CPU. */
+static SDL_Texture *s_hud_tex, *s_field_tex, *s_player_tex;
+static int s_field_w, s_field_h, s_hud_w, s_hud_h, s_field_band;
+static uint32_t *s_field_px;
+static size_t s_field_cap;
+static uint32_t s_player_px[256 * 240];
+static bool s_player_ok, s_want_apart, s_apart;
+static int s_player_x, s_player_y;
+static long s_layers_frame = -1;
+/* Each nametable row of the playfield as it last looked while on screen
+ * (Mega Man 2's lesson): during the screen changes the game writes the next
+ * screen into the rows just off the picture, so rows the easing reveals
+ * there are taken from here, when they were seen in the last few frames at
+ * the same camera X. */
+#define ROW_CACHE_W (256 + 2 * SMOOTH_MARGIN)
+static uint32_t s_rows[240][ROW_CACHE_W];
+static long s_row_frame[240];
+static int s_row_x[240];
+/* The last frame the playfield moved vertically: while a screen change is
+ * under way (and a few frames after) the outermost EDGE_ROWS visible lines
+ * at the top and bottom are also taken from the row memory when it has
+ * them, since the game writes the next screen there too (the blue strip at
+ * the bottom, Nov 24). */
+#define EDGE_ROWS 8
+static long s_vmove_frame = -1000;
+static int s_vmove_dir;
+/* What smooth_prepare built for s_layers_frame: picture size and geometry. */
+static bool s_layers_ok;
+static int s_lay_w, s_lay_h, s_lay_band, s_lay_top, s_lay_side;
+
+/* Scrooge on his own layer while smoothing can draw him (set by the window
+ * loop before each frame; the menu's frames turn it off). */
+static void scrooge_apart(bool want)
+{
+    int band, x, y;
+    bool on = want && dt_sprites_get() && native_present_playfield(&band, &x, &y);
+    if (on != s_apart) {
+        s_apart = on;
+        dt_sprites_set_scrooge_apart(on);
+        native_present_refresh();
+    }
+}
+
+static SDL_Texture *texture(SDL_Texture *t, int w, int h, int *tw, int *th, bool blend)
+{
+    if (t && *tw == w && *th == h) {
+        return t;
+    }
+    if (t) {
+        SDL_DestroyTexture(t);
+    }
+    t = SDL_CreateTexture(s_ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, w, h);
+    if (t) {
+        SDL_SetTextureScaleMode(t, s_set.linear_filter ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
+        SDL_SetTextureBlendMode(t, blend ? SDL_BLENDMODE_BLEND : SDL_BLENDMODE_NONE);
+    }
+    *tw = w;
+    *th = h;
+    return t;
+}
+
+static bool smooth_layers(const uint32_t *pic, int w, int h, long frame, int *band_out, int *top_out,
+                          int *side_out)
+{
+    AppPresentation p;
+    app_present_get(&p);
+    int band;
+    if (p.pixels != APP_PIXELS_NEAREST || p.aspect != APP_ASPECT_SQUARE || !smooth_active(&band)) {
+        return false;
+    }
+    const int top = p.overscan == APP_OVERSCAN_OFF ? 0 : 8, side = p.overscan == APP_OVERSCAN_ALL ? 8 : 0;
+    const int M = SMOOTH_MARGIN, MY = SMOOTH_MARGIN_Y, bp = band - top;
+    if (w != 256 - 2 * side || h != 240 - 2 * top || bp <= 0 || bp >= h) {
+        return false;
+    }
+    const int W = w + 2 * M, fh = h - bp, FH = fh + 2 * MY;
+    if (frame != s_layers_frame || s_field_band != bp || s_field_w != W || s_field_h != FH) {
+        size_t need = (size_t)W * (size_t)FH;
+        if (need > s_field_cap) {
+            free(s_field_px);
+            s_field_px = (uint32_t *)malloc(need * sizeof *s_field_px);
+            s_field_cap = s_field_px ? need : 0;
+            if (!s_field_px) {
+                return false;
+            }
+        }
+        int hw = s_hud_w, hh = s_hud_h;
+        s_hud_tex = texture(s_hud_tex, w, bp, &hw, &hh, false);
+        s_hud_w = hw;
+        s_hud_h = hh;
+        int fw = s_field_w, fhh = s_field_h;
+        s_field_tex = texture(s_field_tex, W, FH, &fw, &fhh, false);
+        s_field_w = fw;
+        s_field_h = fhh;
+        static int pw, ph;
+        s_player_tex = texture(s_player_tex, 256, 240, &pw, &ph, true);
+        if (!s_hud_tex || !s_field_tex || !s_player_tex) {
+            return false;
+        }
+        const uint32_t *left, *right, *up, *down;
+        smooth_margins(&left, &right, &up, &down);
+        int rw, rh;
+        const uint32_t *raw = cyc_render_present(&rw, &rh);
+        bool on;
+        int cam_x, cy, ddx, ddy;
+        double sh0, sh1;
+        smooth_debug(&on, &cam_x, &cy, &ddx, &ddy, &sh0, &sh1);
+        const bool cache = W <= ROW_CACHE_W;
+        if (ddy != 0) {
+            s_vmove_frame = frame;
+            s_vmove_dir = ddy > 0 ? 1 : -1;
+        }
+        const bool moving = frame - s_vmove_frame <= 4;
+        /* Moving down, the rows coming in at the bottom have never been on
+         * screen and are still being written: the background colour until
+         * they are further in (an old TV's overscan hid them). */
+        const uint32_t backdrop = cyc_render_color(0);
+        for (int r = -MY; r < fh + MY; r++) {
+            uint32_t *row = s_field_px + (size_t)(r + MY) * W;
+            const int sy = band + r, content = ((cy + sy) % 240 + 240) % 240;
+            if (r < 0 || r >= fh) {
+                if (cache && s_row_frame[content] >= frame - 8 && s_row_frame[content] < frame &&
+                    s_row_x[content] == cam_x) {
+                    memcpy(row, s_rows[content], (size_t)W * sizeof *row);
+                    continue;
+                }
+                const uint32_t *v = r < 0 ? up + (size_t)(sy + MY) * 256 : down + (size_t)(sy - MY) * 256;
+                for (int e = 0; e < W; e++) {
+                    int c = side - M + e;
+                    row[e] = v[c < 0 ? 0 : c > 255 ? 255 : c];
+                }
+                continue;
+            }
+            const uint32_t *src = pic + (size_t)(bp + r) * w;
+            if (moving && cache && r > 0 && (r <= EDGE_ROWS || r >= fh - EDGE_ROWS) &&
+                s_row_frame[content] >= frame - 8 && s_row_frame[content] < frame && s_row_x[content] == cam_x) {
+                memcpy(row, s_rows[content], (size_t)W * sizeof *row);
+                continue;
+            }
+            if (frame - s_vmove_frame <= 1 && s_vmove_dir > 0 && r >= fh - EDGE_ROWS) {
+                for (int e = 0; e < W; e++) {
+                    row[e] = backdrop;
+                }
+                continue;
+            }
+            if (r == 0) {
+                for (int e = 0; e < W; e++) {
+                    row[e] = src[0];
+                }
+                memcpy(row + M, src, (size_t)w * sizeof *row);
+                continue;
+            }
+            for (int e = 0; e < W; e++) {
+                int c = side - M + e;
+                uint32_t px;
+                if (c < 0) {
+                    px = left[sy * 256 + c + M];
+                } else if (c >= 256) {
+                    px = right[sy * 256 + c - M];
+                } else if (c >= side && c < 256 - side) {
+                    px = src[c - side];
+                } else {
+                    px = raw && rw == 256 ? raw[sy * 256 + c] : 0xFF000000u;
+                }
+                row[e] = px;
+            }
+            if (cache && r > 0) {
+                memcpy(s_rows[content], row, (size_t)W * sizeof *row);
+                s_row_frame[content] = frame;
+                s_row_x[content] = cam_x;
+            }
+        }
+        SDL_UpdateTexture(s_hud_tex, NULL, pic, w * 4);
+        SDL_UpdateTexture(s_field_tex, NULL, s_field_px, W * 4);
+        if (s_player_ok) {
+            SDL_UpdateTexture(s_player_tex, NULL, s_player_px, 256 * 4);
+        }
+        s_field_band = bp;
+        s_layers_frame = frame;
+    }
+    *band_out = bp;
+    *top_out = top;
+    *side_out = side;
+    return true;
+}
+
+static void show_phase(double phase, bool in_between, long frame);
+
+/* The frame's layers, built before its first picture is due so that every
+ * picture is only drawn (CYC_PACING_LOG "prep"). */
+static double s_prep_ms;
+
+static void smooth_prepare(long frame)
+{
+    const Uint64 t0 = SDL_GetPerformanceCounter();
+    int w, h, band, top, side;
+    const uint32_t *pic = app_ui_present(&w, &h);
+    if (!pic || w <= 0 || h <= 0) {
+        pic = cyc_render_present(&w, &h);
+    }
+    s_layers_ok = pic && smooth_layers(pic, w, h, frame, &band, &top, &side);
+    if (s_layers_ok) {
+        s_lay_w = w;
+        s_lay_h = h;
+        s_lay_band = band;
+        s_lay_top = top;
+        s_lay_side = side;
+    }
+    s_prep_ms = (double)(SDL_GetPerformanceCounter() - t0) * 1000.0 / (double)SDL_GetPerformanceFrequency();
+}
+
 static void show(void)
 {
+    show_phase(0, false, -1);
+}
+
+static void draw_layers(double phase, bool in_between, int w, int h, int band, int top, int side);
+
+static void draw_layers(double phase, bool in_between, int w, int h, int band, int top, int side)
+{
+    const int M = SMOOTH_MARGIN, MY = SMOOTH_MARGIN_Y;
+    double sx, sy;
+    smooth_shift(phase, in_between, &sx, &sy);
+    sx = sx > M - 1 ? M - 1 : sx < 1 - M ? 1 - M : sx;
+    sy = sy > MY - 1 ? MY - 1 : sy < 1 - MY ? 1 - MY : sy;
+    SDL_SetRenderDrawColor(s_ren, 0, 0, 0, 255);
+    SDL_RenderClear(s_ren);
+    apply_integer_scale();
+    SDL_Rect hud = { 0, 0, w, band };
+    SDL_RenderCopy(s_ren, s_hud_tex, &hud, &hud);
+    SDL_Rect clip = { 0, band, w, h - band };
+    SDL_RenderSetClipRect(s_ren, &clip);
+    SDL_FRect field = { (float)(sx - M), (float)(band - MY + sy), (float)s_field_w, (float)s_field_h };
+    SDL_RenderCopyF(s_ren, s_field_tex, NULL, &field);
+    SDL_RenderSetClipRect(s_ren, NULL);
+    double px, py;
+    if (s_player_ok && smooth_scrooge_shift(phase, in_between, &px, &py)) {
+        SDL_Rect all = { 0, 0, w, h };
+        SDL_RenderSetClipRect(s_ren, &all);
+        SDL_FRect player = { (float)(px - side), (float)(py - top), 256.0f, 240.0f };
+        SDL_RenderCopyF(s_ren, s_player_tex, NULL, &player);
+        SDL_RenderSetClipRect(s_ren, NULL);
+    }
+}
+
+static void show_phase(double phase, bool in_between, long frame)
+{
+    if (frame >= 0 && frame == s_layers_frame && s_layers_ok && s_note_until <= SDL_GetTicks64() &&
+        ensure_texture(s_lay_w, s_lay_h)) {
+        draw_layers(phase, in_between, s_lay_w, s_lay_h, s_lay_band, s_lay_top, s_lay_side);
+        return;
+    }
     int ow = 0, oh = 0, w, h;
     SDL_GetRendererOutputSize(s_ren, &ow, &oh);
     const uint32_t *pic = app_ui_present(&w, &h);
@@ -731,6 +1005,36 @@ static void show(void)
             memcpy(copy, pic, need * sizeof *copy);
             cyc_overlay_toast(copy, w, h, s_note_title, s_note_body);
             pic = copy;
+        }
+    }
+    int band, top, side;
+    if (frame >= 0 && smooth_layers(pic, w, h, frame, &band, &top, &side)) {
+        draw_layers(phase, in_between, w, h, band, top, side);
+        return;
+    }
+    if (s_apart && s_player_ok) {
+        static uint32_t *with;
+        static size_t with_cap;
+        AppPresentation pp;
+        app_present_get(&pp);
+        const int top0 = pp.overscan == APP_OVERSCAN_OFF ? 0 : 8, side0 = pp.overscan == APP_OVERSCAN_ALL ? 8 : 0;
+        size_t need = (size_t)w * (size_t)h;
+        if (need > with_cap) {
+            free(with);
+            with = (uint32_t *)malloc(need * sizeof *with);
+            with_cap = with ? need : 0;
+        }
+        if (with && w == 256 - 2 * side0 && h == 240 - 2 * top0) {
+            memcpy(with, pic, need * sizeof *with);
+            for (int y = 0; y < h; y++) {
+                for (int x = 0; x < w; x++) {
+                    uint32_t c = s_player_px[(y + top0) * 256 + x + side0];
+                    if (c >> 24) {
+                        with[y * w + x] = c;
+                    }
+                }
+            }
+            pic = with;
         }
     }
     SDL_UpdateTexture(s_tex, NULL, pic, w * 4);
@@ -848,6 +1152,8 @@ static int menu_tick(void)
         next = now;
     }
     int ran = 0;
+    scrooge_apart(false);
+    s_player_ok = false;
     while (next <= now) {
         run_frame(0, 0);
         queue_audio(false);
@@ -855,6 +1161,126 @@ static int menu_tick(void)
         ran++;
     }
     return ran;
+}
+
+/* ---- the window loop's two halves (run_window) ---- */
+
+typedef struct {
+    long frame;
+    bool unpaced;
+    int rate;
+    Uint64 frame_ticks, t_emu0, t_emu1, t_audio;
+    AppPresentation pres;
+} WorkResult;
+
+typedef struct {
+    bool running, pace_5994, uncapped, was_slow;
+    bool prev[CYC_SC_COUNT];
+    int shot;
+    long frames_done;
+    Uint64 freq;
+    WorkResult out;
+} Work;
+
+/* Events, input and one game frame with its sound. */
+static void work(Work *w)
+{
+    SDL_Event ev;
+    while (SDL_PollEvent(&ev)) {
+        if ((ev.type == SDL_KEYDOWN || ev.type == SDL_KEYUP) &&
+            ((ev.key.keysym.mod & KMOD_ALT) || s_fullscreen_chord) &&
+            (ev.key.keysym.scancode == SDL_SCANCODE_RETURN || ev.key.keysym.scancode == SDL_SCANCODE_KP_ENTER)) {
+            continue;
+        }
+        app_ui_event(&ev);
+        if (ev.type == SDL_QUIT) {
+            w->running = false;
+        } else if (ev.type == SDL_CONTROLLERDEVICEADDED || ev.type == SDL_CONTROLLERDEVICEREMOVED) {
+            open_pads();
+        } else if (ev.type == SDL_KEYDOWN && !ev.key.repeat && ev.key.keysym.scancode == SDL_SCANCODE_F8) {
+            save_state();
+        } else if (ev.type == SDL_KEYDOWN && !ev.key.repeat && ev.key.keysym.scancode == SDL_SCANCODE_F9) {
+            load_state();
+            if (s_dev) {
+                SDL_ClearQueuedAudio(s_dev);
+            }
+        }
+    }
+    if (!w->running) {
+        return;
+    }
+    CycInputFrame in;
+    CycInputState st;
+    read_frame(&in);
+    cyc_input_eval(&s_set.bind, &in, &st);
+    bool edge[CYC_SC_COUNT];
+    for (int i = 0; i < CYC_SC_COUNT; i++) {
+        edge[i] = st.shortcut[i] && !w->prev[i];
+        w->prev[i] = st.shortcut[i];
+    }
+    if (edge[CYC_SC_FULLSCREEN]) {
+        s_set.fullscreen = s_set.fullscreen ? 0 : 1;
+        apply_fullscreen();
+        save_settings();
+    }
+    if (edge[CYC_SC_SCREENSHOT]) {
+        int pw, ph;
+        const uint32_t *pic = picture(&pw, &ph);
+        char name[64];
+        snprintf(name, sizeof name, "cyc_shot_%04d.png", w->shot++);
+        if (cyc_write_png(name, pic, pw, ph)) {
+            printf("saved %s\n", name);
+        }
+    }
+    uint8_t buttons[2] = { st.buttons[0], st.buttons[1] };
+    app_ui_input(buttons);
+    /* Pictures a second ([Game] PicturesPerSecond). At 240 the console
+     * runs at 59.94 frames a second, so 4 pictures a frame come at
+     * 239.76 Hz, under a 240 Hz display (4 x 60.0988 = 240.4 is over
+     * it); the synth makes 0.26% more samples a frame to match.
+     * CYC_PACE_5994=0 keeps the console's own rate. */
+    WorkResult *r = &w->out;
+    const bool fast = st.shortcut[CYC_SC_FAST_FORWARD];
+    r->unpaced = fast || w->uncapped;
+    app_present_get(&r->pres);
+    r->rate = r->unpaced ? 60 : app_present_rate_hz(r->pres.rate);
+    const bool slow = r->rate >= 240 && w->pace_5994;
+    r->frame_ticks = (Uint64)((double)w->freq / (slow ? 59.94 : FRAME_HZ));
+    native_audio_set_speed(slow ? FRAME_HZ / 59.94 : 1.0);
+    if (slow != w->was_slow) {
+        printf("[ducktales] window: console paced at %.4f frames a second\n", slow ? 59.94 : FRAME_HZ);
+        fflush(stdout);
+        w->was_slow = slow;
+    }
+    app_ui_frame_begin();
+    r->t_emu0 = SDL_GetPerformanceCounter();
+    run_frame(buttons[0], buttons[1]);
+    r->frame = ++w->frames_done;
+    r->t_emu1 = SDL_GetPerformanceCounter();
+    queue_audio(fast);
+    r->t_audio = SDL_GetPerformanceCounter();
+}
+
+/* After the frame's work and before its first picture: Scrooge's layer, the
+ * easing and the layers the pictures are drawn from. */
+static void frame_finish(const WorkResult *r)
+{
+    const double ms = 1000.0 / (double)SDL_GetPerformanceFrequency();
+    const Uint64 t0 = SDL_GetPerformanceCounter();
+    smooth_set_level(r->pres.smooth);
+    scrooge_apart(r->pres.smooth != APP_SMOOTH_OFF && r->pres.pixels == APP_PIXELS_NEAREST &&
+                  r->pres.aspect == APP_ASPECT_SQUARE);
+    const Uint64 t1 = SDL_GetPerformanceCounter();
+    s_player_ok = s_apart && dt_sprites_scrooge_layer(s_player_px, &s_player_x, &s_player_y);
+    const Uint64 t2 = SDL_GetPerformanceCounter();
+    smooth_frame(s_player_ok, s_player_x, s_player_y);
+    const Uint64 t3 = SDL_GetPerformanceCounter();
+    smooth_prepare(r->frame);
+    const Uint64 t4 = SDL_GetPerformanceCounter();
+    s_fin_ms[0] = (double)(t1 - t0) * ms;
+    s_fin_ms[1] = (double)(t2 - t1) * ms;
+    s_fin_ms[2] = (double)(t3 - t2) * ms;
+    s_fin_ms[3] = (double)(t4 - t0) * ms;
 }
 
 static int run_window(bool hidden, bool uncapped, long exit_after, const char *present_out, long present_every)
@@ -909,108 +1335,54 @@ static int run_window(bool hidden, bool uncapped, long exit_after, const char *p
     const Uint64 freq = SDL_GetPerformanceFrequency();
     Uint64 next = SDL_GetPerformanceCounter(), shown = 0;
     const char *pace_env = getenv("CYC_PACE_5994");
-    const bool pace_5994 = !(pace_env && pace_env[0] == '0');
-    bool was_slow = false;
-    long frames_done = 0, loops = 0;
-    int shot = 0;
-    bool running = true, prev[CYC_SC_COUNT] = { false };
-    while (running) {
-        SDL_Event ev;
-        while (SDL_PollEvent(&ev)) {
-            if ((ev.type == SDL_KEYDOWN || ev.type == SDL_KEYUP) &&
-                ((ev.key.keysym.mod & KMOD_ALT) || s_fullscreen_chord) &&
-                (ev.key.keysym.scancode == SDL_SCANCODE_RETURN || ev.key.keysym.scancode == SDL_SCANCODE_KP_ENTER)) {
-                continue;
-            }
-            app_ui_event(&ev);
-            if (ev.type == SDL_QUIT) {
-                running = false;
-            } else if (ev.type == SDL_CONTROLLERDEVICEADDED || ev.type == SDL_CONTROLLERDEVICEREMOVED) {
-                open_pads();
-            } else if (ev.type == SDL_KEYDOWN && !ev.key.repeat && ev.key.keysym.scancode == SDL_SCANCODE_F8) {
-                save_state();
-            } else if (ev.type == SDL_KEYDOWN && !ev.key.repeat && ev.key.keysym.scancode == SDL_SCANCODE_F9) {
-                load_state();
-                if (dev) {
-                    SDL_ClearQueuedAudio(dev);
-                }
-            }
-        }
-        if (!running) {
-            break;
-        }
-
-        CycInputFrame in;
-        CycInputState st;
-        read_frame(&in);
-        cyc_input_eval(&s_set.bind, &in, &st);
-        bool edge[CYC_SC_COUNT];
-        for (int i = 0; i < CYC_SC_COUNT; i++) {
-            edge[i] = st.shortcut[i] && !prev[i];
-            prev[i] = st.shortcut[i];
-        }
-        if (edge[CYC_SC_FULLSCREEN]) {
-            s_set.fullscreen = s_set.fullscreen ? 0 : 1;
-            apply_fullscreen();
-            save_settings();
-        }
-        if (edge[CYC_SC_SCREENSHOT]) {
-            int pw, ph;
-            const uint32_t *pic = picture(&pw, &ph);
-            char name[64];
-            snprintf(name, sizeof name, "cyc_shot_%04d.png", shot++);
-            if (cyc_write_png(name, pic, pw, ph)) {
-                printf("saved %s\n", name);
-            }
-        }
-        uint8_t buttons[2] = { st.buttons[0], st.buttons[1] };
-        app_ui_input(buttons);
-        /* Pictures a second ([Game] PicturesPerSecond). At 240 the console
-         * runs at 59.94 frames a second, so 4 pictures a frame come at
-         * 239.76 Hz, under a 240 Hz display (4 x 60.0988 = 240.4 is over
-         * it); the synth makes 0.26% more samples a frame to match.
-         * CYC_PACE_5994=0 keeps the console's own rate. */
-        const bool unpaced = st.shortcut[CYC_SC_FAST_FORWARD] || uncapped;
-        AppPresentation pres;
-        app_present_get(&pres);
-        const int rate = unpaced ? 60 : app_present_rate_hz(pres.rate);
-        const bool slow = rate >= 240 && pace_5994;
-        const Uint64 frame_ticks = (Uint64)((double)freq / (slow ? 59.94 : FRAME_HZ));
-        native_audio_set_speed(slow ? FRAME_HZ / 59.94 : 1.0);
-        if (slow != was_slow) {
-            printf("[ducktales] window: console paced at %.4f frames a second\n", slow ? 59.94 : FRAME_HZ);
-            fflush(stdout);
-            was_slow = slow;
-        }
-        app_ui_frame_begin();
-        const Uint64 t_emu0 = SDL_GetPerformanceCounter();
-        run_frame(buttons[0], buttons[1]);
-        frames_done++;
-        bool fast = st.shortcut[CYC_SC_FAST_FORWARD];
-        const Uint64 t_emu1 = SDL_GetPerformanceCounter();
-        queue_audio(fast);
-        const Uint64 t_audio = SDL_GetPerformanceCounter();
-
-        (void)fast;
-        set_vsync(s_set.vsync && !unpaced && rate <= 60);
+    Work lw = { 0 };
+    lw.running = true;
+    lw.pace_5994 = !(pace_env && pace_env[0] == '0');
+    lw.uncapped = uncapped;
+    lw.freq = freq;
+    long loops = 0;
+    /* A frame's work (input, the game, its sound) and its finish (Scrooge's
+     * layer, the easing, the layers) are apart: with more than one picture a
+     * frame the next frame's work runs in the gap before this frame's last
+     * picture, its finish after it, so each has a whole picture's time
+     * (pacing240s3.log: 4.8 ms together, 4.17 between pictures). The
+     * buttons are read one picture earlier for it. */
+    work(&lw);
+    while (lw.running) {
+        WorkResult cur = lw.out;
+        frame_finish(&cur);
+        const long frame = cur.frame;
+        bool next_done = false;
+        set_vsync(s_set.vsync && !cur.unpaced && cur.rate <= 60);
         Uint64 now = SDL_GetPerformanceCounter();
-        if (!unpaced || now - shown >= frame_ticks) {
+        if (!cur.unpaced || now - shown >= cur.frame_ticks) {
             /* The frame's pictures, each held to its even slot of the
              * frame: next, next + step, ... An in-between picture whose slot
              * has passed by more than half a step is skipped (a late frame
              * catches up instead of pushing every later picture back). */
-            const int count = rate / 60;
-            const Uint64 step = frame_ticks / (Uint64)count;
+            const int count = cur.rate / 60;
+            const Uint64 step = cur.frame_ticks / (Uint64)count;
             const double ms = 1000.0 / (double)freq;
             s_pace_step_ms = (double)step * ms;
             for (int i = 0; i < count; i++) {
                 const Uint64 due = next + (Uint64)i * step;
+                if (count > 1 && i == count - 1 && !next_done) {
+                    const Uint64 a0 = SDL_GetPerformanceCounter();
+                    work(&lw);
+                    s_work_at[0] = (double)((long long)(a0 - (next + cur.frame_ticks))) * 1000.0 / (double)freq;
+                    s_work_at[1] = (double)((long long)(SDL_GetPerformanceCounter() - (next + cur.frame_ticks))) *
+                                   1000.0 / (double)freq;
+                    next_done = true;
+                    if (!lw.running) {
+                        break;
+                    }
+                }
                 now = SDL_GetPerformanceCounter();
                 if (i > 0 && now > due + step / 2) {
-                    pace_skip(frames_done, count - i);
+                    pace_skip(frame, count - i);
                     break;
                 }
-                if (!unpaced && now < due) {
+                if (!cur.unpaced && now < due) {
                     Uint32 wait_ms = (Uint32)((due - now) * 1000 / freq);
                     if (wait_ms > 1) {
                         SDL_Delay(wait_ms - 1);
@@ -1019,26 +1391,26 @@ static int run_window(bool hidden, bool uncapped, long exit_after, const char *p
                     }
                 }
                 const Uint64 t_draw0 = SDL_GetPerformanceCounter();
-                show();
+                show_phase((double)i / count, count > 1, frame);
                 if (i == 0 && present_out && present_every > 0 && loops % present_every == 0) {
-                    present_shot(present_out, frames_done);
+                    present_shot(present_out, frame);
                 }
                 const Uint64 t_draw1 = SDL_GetPerformanceCounter();
                 SDL_RenderPresent(s_ren);
                 const Uint64 prev_shown = shown;
                 shown = SDL_GetPerformanceCounter();
-                if (s_pace && !unpaced) {
-                    if (!s_pace_first && frames_done > 120) {
+                if (s_pace && !cur.unpaced) {
+                    if (!s_pace_first && frame > 120) {
                         s_pace_first = t_draw1;
                     }
                     s_pace_last = t_draw1;
                     if (i == 0) {
-                        pace_line(frames_done, (double)(t_emu1 - t_emu0) * ms, (double)(t_audio - t_emu1) * ms,
-                                  (double)(t_draw0 - t_audio) * ms, (double)(t_draw1 - t_draw0) * ms,
+                        pace_line(frame, (double)(cur.t_emu1 - cur.t_emu0) * ms, (double)(cur.t_audio - cur.t_emu1) * ms,
+                                  (double)(t_draw0 - cur.t_audio) * ms, (double)(t_draw1 - t_draw0) * ms,
                                   (double)(shown - t_draw1) * ms, (double)((long long)(t_draw1 - next)) * ms,
                                   prev_shown ? (double)(t_draw1 - s_pace_prev) * ms : 0.0, s_vsync_active);
                     } else {
-                        pace_picture(frames_done, i, (double)((long long)(t_draw1 - next)) * ms,
+                        pace_picture(frame, i, (double)((long long)(t_draw1 - next)) * ms,
                                      (double)(t_draw1 - s_pace_prev) * ms, (double)(t_draw1 - t_draw0) * ms);
                     }
                 }
@@ -1046,13 +1418,19 @@ static int run_window(bool hidden, bool uncapped, long exit_after, const char *p
             }
         }
         loops++;
-        next += frame_ticks;
+        next += cur.frame_ticks;
         now = SDL_GetPerformanceCounter();
-        if (unpaced || now > next + 4 * frame_ticks) {
+        if (cur.unpaced || now > next + 4 * cur.frame_ticks) {
             next = now;
         }
-        if (exit_after > 0 && frames_done >= exit_after) {
-            running = false;
+        if (exit_after > 0 && frame >= exit_after) {
+            lw.running = false;
+        }
+        if (lw.running && !next_done) {
+            const Uint64 a0 = SDL_GetPerformanceCounter();
+            work(&lw);
+            s_work_at[0] = (double)((long long)(a0 - next)) * 1000.0 / (double)freq;
+            s_work_at[1] = (double)((long long)(SDL_GetPerformanceCounter() - next)) * 1000.0 / (double)freq;
         }
     }
     pace_close();

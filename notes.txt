@@ -1,0 +1,40 @@
+DuckTales (USA), Linux fork notes (Claude + user, from Nov 23 2026)
+ROM: roms/baserom.nes, SHA-256 97d472f7b2c1088448d1644155b2650a546bad887b3cba571e16d7986824c169
+     SHA-1 f83191749d019d75eb5ff95d247ef25882c2571a. Mapper 2 (UxROM), CHR RAM, vertical mirroring.
+
+== Pacing (native player, Ryzen 7 2700, CachyOS, 240 Hz FreeSync) ==
+pacing60.log   before: emu 3.6 ms mean (p95 5.6) = game 1.1 + picture 2.7 (drawn twice: picture + background for No sprite flicker)
+pacing60c.log  faster renderer (same pixels, tools/render-test): emu 2.35 mean, p95 3.9; picture 1.36
+pacing240.log  240 pictures/s, 59.94 frames/s: 4 pictures every frame, 3 skipped in 6,260 frames
+               (all when the menu closed), 0 late; picture interval p50 4.15 p95 4.21 ms.
+               One core is enough: no emulation thread needed.
+               The first picture of a frame lands ~0.2 ms later than the other three (it is built
+               fresh); even it out later.
+
+== Amazon route (tests/routes/full_amazon.txt, cycle host, console-faithful, 9,600 frames) ==
+logs/amazon.compact (tools/measure/compact.py), logs/amazon_scroll*.txt (scroll_from_compact.py)
+- Camera X = $F3:$F2, 512 wide. Steps: 1,2,1,2 (period 2) while walking (1.5 px/frame).
+  Histogram: 0 x6119, +-1 x1835, +-2 x1636; cuts (warps, respawn) 18-167 px.
+- Starts and stops are INSTANT: the first steps of a run are already 1,2,1 or 2,1,2; it stops
+  dead the same way. (NG1 case -> camera easing is needed.)
+- 84 one-frame pauses inside runs: lag frames ($92 ticks, Scrooge doesn't move), in the air /
+  pogo / states 9 and 13. The native player's No slowdown (default) removes them.
+- Vertical row change ($E9, 61 frames): ~30 frames with the playfield still (the game draws the
+  new screen), then 29 frames moving 8 px a frame (one tile row) = a whole screen. Fast:
+  MM2's ladder rules (hidden edge rows, fast-scenery easing) apply. 7 of them in the Amazon.
+- $E9 is also set for 2-4 frames, every 8 frames, in row 1 from frame ~6959 (boss area?):
+  a screen shake? To look at.
+- Scrooge is kept at screen X 128 while the camera can move, so his sprites stand still on
+  screen during walks; the background does the moving. A trailing (eased) camera must move
+  him too (world X - eased camera).
+- OAM: 212 of 9,599 frames reorder the same sprites (some rotation); the port's No sprite
+  flicker compositor sets the order anyway.
+
+== Camera simulation (BOSRecomp/tools/camsim/camsim.py on logs/amazon_scroll_nolag.txt) ==
+design                      acc99.9 acc_rms jolts/s lag_avg lag_max
+game camera (no smoothing)    8.000   1.287   22.44     0.0     0.0
+spring T=4 ff N=8             0.606   0.091    0.00     0.8    10.7
+spring T=6 ff N=8             0.501   0.077    0.00     1.2    13.8
+avg N=8 + spring T=3          0.309   0.049    0.00     5.0    16.1   <- BOS "Calm"
+avg N=12 + spring T=3         0.253   0.044    0.00     6.0    19.1   <- BOS "Calmer"
+Candidates for the menu: Quick = spring T4 ff N8, Calm = avg N8 T3, Calmer = avg N12 T3.

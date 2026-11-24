@@ -74,6 +74,13 @@ static FILE *s_log;
 static uint8_t s_last_oam[256];
 static bool s_last_valid;
 static uint32_t s_background[256 * 240];
+/* Scrooge apart (dt_sprites_set_scrooge_apart): his entries are list[1..s_scrooge_n]. */
+static bool s_apart;
+static int s_scrooge_n, s_scrooge_x, s_scrooge_y;
+static const Sprite *s_list_ref;
+static int s_list_n;
+static uint16_t s_list_hud_table;
+static uint64_t s_list_generation;
 
 /* ---- the builder's rules on a saved RAM image ---- */
 
@@ -223,6 +230,17 @@ static int rebuild(const uint8_t *ram, const uint8_t *oam, Sprite *list, bool *h
     for (int k = 0; k < count[DT_SLOT_SCROOGE]; k++) {
         list[n++] = slot[DT_SLOT_SCROOGE][k];
     }
+    s_scrooge_n = count[DT_SLOT_SCROOGE] > 0 ? count[DT_SLOT_SCROOGE] : 0;
+    {
+        const int z = DT_SLOT_SCROOGE;
+        int x = ram[DT_ROW_POS_X + z];
+        if (ram[DT_ROW_STATUS + z] & 0x20) {
+            x = (int)(ram[DT_ROW_POS_PAGE + z] * 256 + ram[DT_ROW_POS_X + z]) -
+                (int)(ram[DT_ADDR_CAMERA_PAGE] * 256 + ram[DT_ADDR_CAMERA_X]);
+        }
+        s_scrooge_x = x;
+        s_scrooge_y = ram[DT_ROW_Y + z];
+    }
     for (int i = 0; i < hud_n; i++) {
         list[n++] = hud[i];
     }
@@ -247,14 +265,20 @@ static int rebuild(const uint8_t *ram, const uint8_t *oam, Sprite *list, bool *h
 
 /* ---- drawing ---- */
 
-static int draw(uint32_t *out, const Sprite *list, int n, uint16_t hud_table)
+/* skip_from..skip_to (inclusive) are left out; layer: out starts
+ * transparent (0) and only sprite pixels are written. */
+static int draw_part(uint32_t *out, const Sprite *list, int n, uint16_t hud_table, int skip_from, int skip_to,
+                     bool layer)
 {
     int crowded = 0;
     const uint8_t *opaque = cyc_frame_bg_opaque();
     for (int y = 0; y < 240; y++) {
         uint32_t *line = &out[y * 256];
-        const uint32_t *bg = &s_background[y * 256];
-        memcpy(line, bg, 256 * sizeof *line);
+        if (layer) {
+            memset(line, 0, 256 * sizeof *line);
+        } else {
+            memcpy(line, &s_background[y * 256], 256 * sizeof *line);
+        }
         uint8_t mask = cyc_render_line_mask(y);
         if (!(mask & 0x10)) {
             continue;
@@ -265,6 +289,9 @@ static int draw(uint32_t *out, const Sprite *list, int n, uint16_t hud_table)
         uint32_t color[256];
         uint8_t taken[256] = { 0 }, behind[256];
         for (int i = 0; i < n; i++) {
+            if (i >= skip_from && i <= skip_to) {
+                continue;
+            }
             const Sprite *s = &list[i];
             int r = y - (s->y + 1);
             if (s->y >= 0xEF || r < 0 || r >= h) {
@@ -303,6 +330,11 @@ static int draw(uint32_t *out, const Sprite *list, int n, uint16_t hud_table)
         }
     }
     return crowded;
+}
+
+static int draw(uint32_t *out, const Sprite *list, int n, uint16_t hud_table)
+{
+    return draw_part(out, list, n, hud_table, -1, -1, false);
 }
 
 /* The mods' tiles and palettes over the picture, drawn from list (NULL: the OAM). */
@@ -379,7 +411,15 @@ static int compose(uint32_t *out, int width, int height, int native_x0, const ui
     if (visible > 63) {
         s_stats.beyond_63 += (uint64_t)(visible - 63);
     }
-    int crowded = draw(out, list, n, hud_table);
+    s_list_ref = list;
+    s_list_n = n;
+    s_list_hud_table = hud_table;
+    s_list_generation = cyc_render_generation();
+    if (strcmp(how, "fallback") == 0) {
+        s_scrooge_n = 0;
+    }
+    int crowded = s_apart && s_scrooge_n > 0 ? draw_part(out, list, n, hud_table, 1, s_scrooge_n, false)
+                                             : draw(out, list, n, hud_table);
     if (app_mods_video_active()) {
         paint_mods(out, list, n, hud_table);
     }
@@ -389,6 +429,32 @@ static int compose(uint32_t *out, int width, int height, int native_x0, const ui
                 (unsigned long)(cyc_ring_frame - 1), how, visible, crowded, hud_restored ? 1 : 0, leftover);
     }
     return 1;
+}
+
+/* ---- Scrooge apart (smooth scrolling) ---- */
+
+void dt_sprites_set_scrooge_apart(bool on)
+{
+    s_apart = on;
+}
+
+bool dt_sprites_scrooge_layer(uint32_t *out, int *x, int *y)
+{
+    int w, h;
+    cyc_render_present(&w, &h);
+    if (!s_apart || !s_on || !s_list_ref || s_scrooge_n <= 0 || s_list_generation != cyc_render_generation()) {
+        return false;
+    }
+    const int last = s_scrooge_n;
+    Sprite only[1 + SLOT_SPRITES];
+    int n = 0;
+    for (int i = 1; i <= last && i < s_list_n; i++) {
+        only[n++] = s_list_ref[i];
+    }
+    draw_part(out, only, n, s_list_hud_table, -1, -1, true);
+    *x = s_scrooge_x;
+    *y = s_scrooge_y;
+    return true;
 }
 
 /* ---- the setting and the host ---- */

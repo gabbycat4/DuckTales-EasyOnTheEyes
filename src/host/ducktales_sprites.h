@@ -33,6 +33,15 @@ void dt_sprites_forget(void);
 /* The mods were loaded: compose every picture while they paint tiles or palettes. */
 void dt_sprites_mods_changed(void);
 
+/* Smooth scrolling (native/native_smooth.h): with apart on, the composed
+ * picture leaves Scrooge's sprites out, and dt_sprites_scrooge_layer draws
+ * them alone (256 x 240 ARGB, 0 where none) for the current picture, with
+ * his on-screen position as the game placed him (*x may be off screen).
+ * False when there is no such layer (no rebuilt list, he is not drawn, or
+ * No sprite flicker is off). */
+void dt_sprites_set_scrooge_apart(bool on);
+bool dt_sprites_scrooge_layer(uint32_t *out, int *x, int *y);
+
 typedef struct {
     uint64_t composed;     /* pictures drawn from the rebuilt sprite list */
     uint64_t reused;       /* pictures whose OAM equals the last rebuilt one (list kept) */

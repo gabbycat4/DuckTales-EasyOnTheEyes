@@ -189,6 +189,70 @@ void native_present_frame(const NativeFrame *f)
     s_generation++;
 }
 
+/* ---- smooth scrolling (native_present.h) ---- */
+
+static NvVideo s_video;
+static uint64_t s_video_generation;
+
+static const NvVideo *video(void)
+{
+    if (s_video_generation != s_generation) {
+        nv_cycle_fill(&s_video);
+        s_video_generation = s_generation;
+    }
+    return &s_video;
+}
+
+void native_present_refresh(void)
+{
+    s_generation++;
+}
+
+bool native_present_playfield(int *band, int *x, int *y)
+{
+    const NvVideo *v = video();
+    if (v->segment_count != 2) {
+        return false;
+    }
+    const NvSegment *hud = &v->segment[0], *field = &v->segment[1];
+    if (field->first_line < 24 || field->first_line > 80 || !(field->mask & NV_MASK_BG) ||
+        !(hud->mask & NV_MASK_BG)) {
+        return false;
+    }
+    *band = field->first_line;
+    *x = field->x & 511;
+    const int probe = field->first_line + 2;
+    *y = ((cyc_render_line_scroll_y(probe) - probe) % 240 + 240) % 240;
+    return true;
+}
+
+void native_present_shifted_background(int band, int dx, int dy, uint32_t *out)
+{
+    static NvVideo shifted;
+    static uint16_t index[NV_WIDTH * NV_HEIGHT];
+    static const NvSprite none[1];
+    const NvRenderOptions bg_only = { 0, none, 0 };
+    shifted = *video();
+    for (int i = 0; i < shifted.segment_count; i++) {
+        NvSegment *s = &shifted.segment[i];
+        bool covers = i + 1 >= shifted.segment_count || shifted.segment[i + 1].first_line > band;
+        if (s->first_line >= band || covers) {
+            const int lines = ((dy % 480) + 480) % 480;
+            s->x = (uint16_t)((s->x + dx) & 511);
+            s->y = nv_advance_y(s->y, lines);
+            if (s->split_column < NV_NO_SPLIT) {
+                s->split_x = (uint16_t)((s->split_x + dx) & 511);
+                s->split_y = nv_advance_y(s->split_y, lines);
+            }
+        }
+    }
+    if (band < 0) {
+        band = 0;
+    }
+    nv_render_lines(&shifted, &bg_only, band, NV_HEIGHT - 1, index, NULL);
+    nv_to_argb(index + band * NV_WIDTH, out + band * NV_WIDTH, (NV_HEIGHT - band) * NV_WIDTH);
+}
+
 /* ---- cyc_core.h, cyc_render.h ---- */
 
 const CycLine *cyc_frame_lines(void)
