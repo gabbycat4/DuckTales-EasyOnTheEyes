@@ -12,7 +12,7 @@
 set -euo pipefail
 
 rom="${1:-roms/baserom.nes}"
-repo="${2:-gabbycat4/DuckTalesRecomp}"
+repo="${2:-gabbycat4/DuckTales-EasyOnTheEyes}"
 
 [ -f "$rom" ] || { echo "No ROM at $rom (pass its path as the first argument)" >&2; exit 1; }
 command -v gh >/dev/null || { echo "Needs the GitHub CLI (gh), logged in" >&2; exit 1; }

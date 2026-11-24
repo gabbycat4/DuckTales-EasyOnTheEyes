@@ -2,7 +2,9 @@
 
 <img src="assets/icon/ducktales-128.png" alt="DuckTales Recompiled" width="128" height="128">
 
-# DuckTales Recompiled for Linux
+# DuckTales: Easy on the Eyes
+
+*DuckTales Recompiled for Linux, with 240 Hz and smooth scrolling*
 
 An unofficial fork of [formae-group/ducktales-recompiled](https://github.com/formae-group/ducktales-recompiled)
 that adds a **Linux build (AppImage)**, **up to 240 pictures a second** and **smooth scrolling**.
@@ -53,8 +55,8 @@ Needs: git, cmake, ninja, gcc/g++, Python 3.11+, SDL2 development files
 for the ROM file chooser.
 
 ```sh
-git clone --recurse-submodules https://github.com/gabbycat4/DuckTalesRecomp.git
-cd DuckTalesRecomp
+git clone --recurse-submodules https://github.com/gabbycat4/DuckTales-EasyOnTheEyes.git
+cd DuckTales-EasyOnTheEyes
 cp /path/to/your/DuckTales.nes roms/baserom.nes
 cmake -S . -B build-play -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build-play --parallel

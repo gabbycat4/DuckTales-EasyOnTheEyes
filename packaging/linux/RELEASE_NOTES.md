@@ -1,4 +1,4 @@
-DuckTales Recompiled for Linux: an unofficial fork of
+DuckTales: Easy on the Eyes. DuckTales Recompiled for Linux, an unofficial fork of
 [formae-group/ducktales-recompiled](https://github.com/formae-group/ducktales-recompiled)
 with a Linux build, up to 240 pictures a second and smooth scrolling.
 
