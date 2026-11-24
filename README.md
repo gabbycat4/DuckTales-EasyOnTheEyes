@@ -2,6 +2,90 @@
 
 <img src="assets/icon/ducktales-128.png" alt="DuckTales Recompiled" width="128" height="128">
 
+# DuckTales Recompiled for Linux
+
+An unofficial fork of [formae-group/ducktales-recompiled](https://github.com/formae-group/ducktales-recompiled)
+that adds a **Linux build (AppImage)**, **up to 240 pictures a second** and **smooth scrolling**.
+
+</div>
+
+> **All credit for the port itself goes to the original authors.** This fork only adds the
+> Linux build and the motion options below; everything else is their work, described in their
+> README further down. Please report problems with the Linux build or the smooth scrolling
+> here, not to them.
+
+## Play on Linux
+
+**You need your own DuckTales (USA) ROM** ([which one](#supported-rom)). The download
+contains nothing from the game.
+
+1. Download `DuckTalesRecompiled-x86_64.AppImage` from the [Releases](../../releases) page.
+2. Make it executable: right-click it → Properties → Permissions → *Allow executing file as
+   program*. Or in a terminal: `chmod +x DuckTalesRecompiled-x86_64.AppImage`
+3. Double-click it. On the first start, choose your ROM file (or drop it on the window).
+
+It runs on distributions from about 2022 on (glibc 2.35 or newer: Ubuntu 22.04, Fedora 36,
+Debian 12, Arch, CachyOS, Linux Mint 21 and newer). Your settings, save states and the checked
+copy of your ROM are kept in `~/.local/share/DuckTales Recompiled/`.
+
+### Recommended settings for a fast monitor
+
+Escape (or RB on a controller) opens the menu. In **Settings → Graphics**:
+
+| Setting | Recommended | What it does |
+|---|---|---|
+| Pictures per second | Your monitor's refresh rate: 120, 180 or 240 | Draws in-between pictures. At 240 the game runs at 59.94 frames a second (0.26% slower, not noticeable) so the pictures fit a 240 Hz monitor exactly |
+| Smooth scrolling | Calm | Eases the camera: the level glides instead of stepping 1 and 2 pixels, starting and stopping at once. Scrooge, enemies and items glide too. Calmer and Slowest are gentler. Needs Pixels: Nearest and Pixel aspect: Square |
+| Screen changes | Soft | The screen moves up or down to the next area with a gentle start and stop (Even: one steady speed) |
+| Frame pacing | Auto or Steady | Steady holds every picture to an even rhythm without VSync |
+
+With a FreeSync or G-Sync monitor, also turn on your desktop's adaptive sync (KDE Plasma:
+System Settings → Display → Adaptive sync: *Always*).
+
+All of these change only the picture: the game itself runs exactly as the original. Set
+Smooth scrolling to Off and Pictures per second to 60 for the original look.
+
+### Build it yourself on Linux
+
+Needs: git, cmake, ninja, gcc/g++, Python 3.11+, SDL2 development files
+(Arch/CachyOS: `sudo pacman -S --needed cmake ninja sdl2-compat`; Ubuntu/Debian:
+`sudo apt install cmake ninja-build g++ libsdl2-dev python3`). Optional: `kdialog` or `zenity`
+for the ROM file chooser.
+
+```sh
+git clone --recurse-submodules https://github.com/gabbycat4/DuckTalesRecomp.git
+cd DuckTalesRecomp
+cp /path/to/your/DuckTales.nes roms/baserom.nes
+cmake -S . -B build-play -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build-play --parallel
+./build-play/ducktales
+```
+
+`bash tools/release/make_appimage.sh` packs your build into an AppImage. For developers:
+`CYC_PACING_LOG=pacing.log ./build-play/ducktales` writes when every picture was drawn and
+shown, and how long each part of a frame took.
+
+### What this fork changes
+
+- **Linux:** the mod loader's folders and paths, case-insensitive names, the save-state
+  folder, a KDE/GNOME ROM chooser and menu fonts on other distributions. Windows code is
+  unchanged.
+- **A faster picture drawer** (`src/native/native_render.c`): the same pixels, about 2.6
+  times faster, checked on 12,000 random frames (`tools/render-test/render_equal.c`).
+- **Pictures per second** 60-240 and 59.94 frames a second at 240 (`src/native/native_window.c`).
+- **Smooth scrolling** (`src/native/native_smooth.c`): the HUD, the level, Scrooge and every
+  enemy and item are drawn as separate layers that the graphics card places between pixels.
+  The camera is eased the way gabbycat4's other NES ports do it (a moving average with a spring); Scrooge
+  and the objects are followed by their slots in the game's own object table, so their glide
+  never confuses one object with another. Tested offline on the game's own Amazon route:
+  `tools/smooth-test/`.
+
+---
+
+<div align="center">
+
+*The original project's README follows.*
+
 # DuckTales Recompiled
 
 A native Windows port of *DuckTales* (NES, Capcom, 1989), built by static recompilation.

@@ -1,0 +1,117 @@
+# .github/workflows/linux-appimage.yml - builds the Linux AppImage on
+# GitHub's machines (this fork; the original project is Windows only).
+# Run it from the Actions tab (Run workflow) to test: the AppImage is then a
+# download on that run's page. Pushing a tag v* also publishes a Release with
+# it. The ROM comes from the DT_ROM_* secrets (tools/release/upload-rom-secret.sh)
+# and is never part of the AppImage.
+name: Linux AppImage
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+env:
+  SDL_VERSION: '2.32.10'
+
+jobs:
+  appimage:
+    # The oldest supported runner: the AppImage then runs on any distribution
+    # at least as new as Ubuntu 22.04 (glibc 2.35).
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ninja-build patchelf file xz-utils \
+            libgl-dev libopengl-dev libglx-dev libegl-dev libgles-dev \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxfixes-dev \
+            libxi-dev libxss-dev libxinerama-dev libxkbcommon-dev \
+            libwayland-dev wayland-protocols libdecor-0-dev libdrm-dev libgbm-dev \
+            libasound2-dev libpulse-dev libpipewire-0.3-dev libdbus-1-dev libudev-dev
+
+      # A current SDL2 (better Wayland, PipeWire and controller support than
+      # Ubuntu 22.04's), built so it loads X11/Wayland/audio at run time.
+      - name: Build SDL2
+        run: |
+          git clone --depth 1 --branch "release-$SDL_VERSION" https://github.com/libsdl-org/SDL.git "$RUNNER_TEMP/SDL"
+          cmake -S "$RUNNER_TEMP/SDL" -B "$RUNNER_TEMP/SDL/build" -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/sdl2" \
+            -DSDL_STATIC=OFF -DSDL_SHARED=ON -DSDL_TEST=OFF
+          cmake --build "$RUNNER_TEMP/SDL/build"
+          cmake --install "$RUNNER_TEMP/SDL/build"
+
+      - name: Restore the ROM from secrets
+        shell: bash
+        run: |
+          cat > rom.b64 <<'DT_ROM_EOF'
+          ${{ secrets.DT_ROM_0 }}
+          ${{ secrets.DT_ROM_1 }}
+          ${{ secrets.DT_ROM_2 }}
+          ${{ secrets.DT_ROM_3 }}
+          ${{ secrets.DT_ROM_4 }}
+          ${{ secrets.DT_ROM_5 }}
+          ${{ secrets.DT_ROM_6 }}
+          ${{ secrets.DT_ROM_7 }}
+          DT_ROM_EOF
+          mkdir -p roms
+          python tools/release/restore_rom.py roms/baserom.nes rom.b64
+          rm -f rom.b64
+
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/sdl2"
+          -DSDL2_DIR="$RUNNER_TEMP/sdl2/lib/cmake/SDL2"
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Package AppImage
+        run: |
+          rm -f roms/baserom.nes
+          app=AppDir
+          mkdir -p "$app/usr/bin" "$app/usr/lib"
+          cp build/ducktales "$app/usr/bin/"
+          strip "$app/usr/bin/ducktales"
+          cp -L "$RUNNER_TEMP/sdl2/lib/libSDL2-2.0.so.0" "$app/usr/lib/"
+          patchelf --set-rpath '$ORIGIN/../lib' "$app/usr/bin/ducktales"
+          bash tools/release/collect_licenses.sh "$app/usr/share/doc/ducktales" build "$RUNNER_TEMP/SDL/LICENSE.txt"
+          cp packaging/linux/AppRun "$app/AppRun"
+          chmod +x "$app/AppRun"
+          cp packaging/linux/ducktales.desktop packaging/linux/ducktales.png "$app/"
+          ln -s ducktales.png "$app/.DirIcon"
+          echo "${{ github.ref_name }}-${{ github.sha }}" > "$app/VERSION"
+          echo "Libraries the game needs:"
+          readelf -d "$app/usr/bin/ducktales" | grep -E 'NEEDED|RUNPATH|RPATH'
+          if find "$app" -iname '*.nes' | grep -q .; then echo "ROM in package" >&2; exit 1; fi
+          curl -fsSL -o appimagetool https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x appimagetool
+          ARCH=x86_64 ./appimagetool --appimage-extract-and-run "$app" DuckTalesRecompiled-x86_64.AppImage
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DuckTalesRecompiled-x86_64.AppImage
+          path: DuckTalesRecompiled-x86_64.AppImage
+
+      - name: Publish the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            --title "DuckTales Recompiled for Linux ${{ github.ref_name }}" \
+            --notes-file packaging/linux/RELEASE_NOTES.md \
+            DuckTalesRecompiled-x86_64.AppImage

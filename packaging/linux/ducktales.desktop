@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=DuckTales Recompiled
+Comment=Native port of DuckTales (NES) with 240 Hz smooth scrolling; needs your own ROM
+Exec=ducktales
+Icon=ducktales
+Categories=Game;ActionGame;
+Terminal=false
