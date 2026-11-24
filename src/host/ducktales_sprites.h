@@ -42,6 +42,24 @@ void dt_sprites_mods_changed(void);
 void dt_sprites_set_scrooge_apart(bool on);
 bool dt_sprites_scrooge_layer(uint32_t *out, int *x, int *y);
 
+/* The same for the other objects (character glide): with objects apart on,
+ * the composed picture leaves out every drawn object that has no sprite
+ * behind the background and none in the HUD band (apart), and
+ * dt_sprites_object_layer draws one of them alone into out (bw x bh ARGB, 0
+ * where none, at most cap pixels) at screen position bx, by. Objects come in
+ * the list's drawing order, front first. x: world X (page * 256 + low) when
+ * world, else screen X; y: screen Y; action: its script (a change is a new
+ * object in the slot). */
+typedef struct {
+    int slot, first, count;
+    bool world, apart;
+    int x, y, action;
+} DtObject;
+
+void dt_sprites_set_objects_apart(bool on);
+int dt_sprites_objects(const DtObject **out);
+bool dt_sprites_object_layer(const DtObject *o, uint32_t *out, int cap, int *bx, int *by, int *bw, int *bh);
+
 typedef struct {
     uint64_t composed;     /* pictures drawn from the rebuilt sprite list */
     uint64_t reused;       /* pictures whose OAM equals the last rebuilt one (list kept) */

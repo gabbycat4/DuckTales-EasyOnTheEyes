@@ -226,6 +226,18 @@ bool native_present_playfield(int *band, int *x, int *y)
     return true;
 }
 
+bool native_present_playfield_merged(int band, int *x, int *y)
+{
+    const NvVideo *v = video();
+    if (v->segment_count != 1 || band < 24 || band > 80 || !(v->segment[0].mask & NV_MASK_BG)) {
+        return false;
+    }
+    *x = v->segment[0].x & 511;
+    const int probe = band + 2;
+    *y = ((cyc_render_line_scroll_y(probe) - probe) % 240 + 240) % 240;
+    return true;
+}
+
 void native_present_shifted_background(int band, int dx, int dy, uint32_t *out)
 {
     static NvVideo shifted;

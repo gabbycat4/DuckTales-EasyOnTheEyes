@@ -738,6 +738,17 @@ static uint32_t *s_field_px;
 static size_t s_field_cap;
 static uint32_t s_player_px[256 * 240];
 static bool s_player_ok, s_want_apart, s_apart;
+/* Character glide: each object drawn apart, packed in one atlas texture. */
+#define DT_OBJ_SLOTS_WINDOW 16
+#define ATLAS_W 512
+#define ATLAS_H 512
+typedef struct {
+    int slot, ax, ay, bx, by, bw, bh;
+} ObjLayer;
+static SDL_Texture *s_atlas_tex;
+static uint32_t s_atlas[ATLAS_W * ATLAS_H];
+static ObjLayer s_objs[DT_OBJ_SLOTS_WINDOW];
+static int s_obj_n;
 static int s_player_x, s_player_y;
 static long s_layers_frame = -1;
 /* Each nametable row of the playfield as it last looked while on screen
@@ -765,13 +776,86 @@ static int s_lay_w, s_lay_h, s_lay_band, s_lay_top, s_lay_side;
  * loop before each frame; the menu's frames turn it off). */
 static void scrooge_apart(bool want)
 {
-    int band, x, y;
-    bool on = want && dt_sprites_get() && native_present_playfield(&band, &x, &y);
+    int band, x, y, known;
+    bool on = want && dt_sprites_get() &&
+              (native_present_playfield(&band, &x, &y) ||
+               (smooth_active(&known) && native_present_playfield_merged(known, &x, &y)));
     if (on != s_apart) {
         s_apart = on;
         dt_sprites_set_scrooge_apart(on);
+        dt_sprites_set_objects_apart(on);
         native_present_refresh();
     }
+}
+
+/* The objects drawn apart this frame into the atlas (shelves of rows), and
+ * their motion into the easing. An object that does not fit is drawn
+ * without glide: it is then left in the picture by the next frame. */
+static void objects_frame(void)
+{
+    const DtObject *objs;
+    int n = s_apart ? dt_sprites_objects(&objs) : 0;
+    int slot[DT_OBJ_SLOTS_WINDOW], ox[DT_OBJ_SLOTS_WINDOW], oy[DT_OBJ_SLOTS_WINDOW];
+    bool world[DT_OBJ_SLOTS_WINDOW];
+    int count = 0, cx = 0, cy = 0, shelf = 0;
+    s_obj_n = 0;
+    for (int i = 0; i < n && s_obj_n < DT_OBJ_SLOTS_WINDOW; i++) {
+        if (!objs[i].apart) {
+            continue;
+        }
+        static uint32_t tmp[256 * 240];
+        int bx, by, bw, bh;
+        if (!dt_sprites_object_layer(&objs[i], tmp, 256 * 240, &bx, &by, &bw, &bh)) {
+            continue;
+        }
+        if (cx + bw > ATLAS_W) {
+            cx = 0;
+            cy += shelf;
+            shelf = 0;
+        }
+        if (cy + bh > ATLAS_H) {
+            break;
+        }
+        for (int r = 0; r < bh; r++) {
+            memcpy(&s_atlas[(cy + r) * ATLAS_W + cx], &tmp[r * bw], (size_t)bw * sizeof *tmp);
+        }
+        s_objs[s_obj_n++] = (ObjLayer){ objs[i].slot, cx, cy, bx, by, bw, bh };
+        slot[count] = objs[i].slot;
+        world[count] = objs[i].world;
+        ox[count] = objs[i].x;
+        oy[count] = objs[i].y;
+        count++;
+        cx += bw;
+        shelf = bh > shelf ? bh : shelf;
+    }
+    smooth_objects(slot, world, ox, oy, count);
+    if (s_obj_n && (s_atlas_tex || (s_atlas_tex = SDL_CreateTexture(s_ren, SDL_PIXELFORMAT_ARGB8888,
+                                                                       SDL_TEXTUREACCESS_STREAMING, ATLAS_W, ATLAS_H)))) {
+        SDL_SetTextureBlendMode(s_atlas_tex, SDL_BLENDMODE_BLEND);
+        SDL_SetTextureScaleMode(s_atlas_tex, s_set.linear_filter ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
+        SDL_Rect used = { 0, 0, ATLAS_W, cy + shelf };
+        if (used.h > 0) {
+            SDL_UpdateTexture(s_atlas_tex, &used, s_atlas, ATLAS_W * 4);
+        }
+    }
+}
+
+/* Draw the objects back to front, each at its eased place, inside clip. */
+static void draw_objects(double phase, bool in_between, int top, int side, const SDL_Rect *clip)
+{
+    if (!s_obj_n || !s_atlas_tex) {
+        return;
+    }
+    SDL_RenderSetClipRect(s_ren, clip);
+    for (int i = s_obj_n - 1; i >= 0; i--) {
+        const ObjLayer *o = &s_objs[i];
+        double dx = 0, dy = 0;
+        smooth_object_shift(o->slot, phase, in_between, &dx, &dy);
+        SDL_Rect src = { o->ax, o->ay, o->bw, o->bh };
+        SDL_FRect dst = { (float)(o->bx - side + dx), (float)(o->by - top + dy), (float)o->bw, (float)o->bh };
+        SDL_RenderCopyF(s_ren, s_atlas_tex, &src, &dst);
+    }
+    SDL_RenderSetClipRect(s_ren, NULL);
 }
 
 static SDL_Texture *texture(SDL_Texture *t, int w, int h, int *tw, int *th, bool blend)
@@ -966,6 +1050,7 @@ static void draw_layers(double phase, bool in_between, int w, int h, int band, i
     SDL_FRect field = { (float)(sx - M), (float)(band - MY + sy), (float)s_field_w, (float)s_field_h };
     SDL_RenderCopyF(s_ren, s_field_tex, NULL, &field);
     SDL_RenderSetClipRect(s_ren, NULL);
+    draw_objects(phase, in_between, top, side, &clip);
     double px, py;
     if (s_player_ok && smooth_scrooge_shift(phase, in_between, &px, &py)) {
         SDL_Rect all = { 0, 0, w, h };
@@ -1012,7 +1097,7 @@ static void show_phase(double phase, bool in_between, long frame)
         draw_layers(phase, in_between, w, h, band, top, side);
         return;
     }
-    if (s_apart && s_player_ok) {
+    if (s_apart) {
         static uint32_t *with;
         static size_t with_cap;
         AppPresentation pp;
@@ -1026,7 +1111,19 @@ static void show_phase(double phase, bool in_between, long frame)
         }
         if (with && w == 256 - 2 * side0 && h == 240 - 2 * top0) {
             memcpy(with, pic, need * sizeof *with);
-            for (int y = 0; y < h; y++) {
+            for (int i = s_obj_n - 1; i >= 0; i--) {
+                const ObjLayer *o = &s_objs[i];
+                for (int r = 0; r < o->bh; r++) {
+                    for (int c = 0; c < o->bw; c++) {
+                        int x = o->bx + c - side0, y = o->by + r - top0;
+                        uint32_t px = s_atlas[(o->ay + r) * ATLAS_W + o->ax + c];
+                        if ((px >> 24) && x >= 0 && x < w && y >= 0 && y < h) {
+                            with[y * w + x] = px;
+                        }
+                    }
+                }
+            }
+            for (int y = 0; s_player_ok && y < h; y++) {
                 for (int x = 0; x < w; x++) {
                     uint32_t c = s_player_px[(y + top0) * 256 + x + side0];
                     if (c >> 24) {
@@ -1274,6 +1371,7 @@ static void frame_finish(const WorkResult *r)
     s_player_ok = s_apart && dt_sprites_scrooge_layer(s_player_px, &s_player_x, &s_player_y);
     const Uint64 t2 = SDL_GetPerformanceCounter();
     smooth_frame(s_player_ok, s_player_x, s_player_y);
+    objects_frame();
     const Uint64 t3 = SDL_GetPerformanceCounter();
     smooth_prepare(r->frame);
     const Uint64 t4 = SDL_GetPerformanceCounter();

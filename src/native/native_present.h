@@ -20,6 +20,11 @@ void native_present_frame(const NativeFrame *frame);
  * nametable row its lines start from relative to the screen (0-239). */
 bool native_present_playfield(int *band, int *x, int *y);
 
+/* The same when the split vanished: the playfield at X 0 lines up with the
+ * HUD (NG2's lesson), so the frame is one segment. With the band known from
+ * the frames before, *x and *y are that segment's position at line band. */
+bool native_present_playfield_merged(int band, int *x, int *y);
+
 /* Draw the current picture again on its next use (a compositor setting
  * changed). */
 void native_present_refresh(void);

@@ -39,6 +39,12 @@ void native_present_refresh(void)
 {
 }
 
+bool native_present_playfield_merged(int band, int *x, int *y)
+{
+    (void)band, (void)x, (void)y;
+    return false;
+}
+
 typedef struct {
     double prev, prev_v;
     int have, have_v;

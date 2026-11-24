@@ -45,6 +45,15 @@ bool smooth_scrooge_shift(double p, bool in_between, double *dx, double *dy);
  * frame. */
 void smooth_margins(const uint32_t **left, const uint32_t **right, const uint32_t **up, const uint32_t **down);
 
+/* Character glide: after smooth_frame, the objects drawn apart this frame
+ * (host/ducktales_sprites.h DtObject: slot, world, x, y). */
+#define SMOOTH_SLOTS 16
+void smooth_objects(const int *slot, const bool *world, const int *x, const int *y, int count);
+
+/* How far right and down object `slot` is drawn from where the game put
+ * it, for a picture at phase p. False when it is not tracked. */
+bool smooth_object_shift(int slot, double p, bool in_between, double *dx, double *dy);
+
 /* The nametable row the playfield's screen line 0 starts from (0-239):
  * screen line L shows row (smooth_content_y() + L) % 240. */
 int smooth_content_y(void);

@@ -23,6 +23,16 @@
  * stepped evenly between frames: 4 lines a frame, one a picture at 240,
  * starting and stopping in half steps.
  *
+ * Objects (enemies, items, shots: character glide). Each object the
+ * compositor draws apart is followed by its slot: the average of its last
+ * OBJ_AVG positions (Amazon route: 1 px a frame, 1,0,1,0, and falls that
+ * speed up 1,1,1,2,2,3), never more than OBJ_LAG pixels behind the game,
+ * stepped evenly between frames. World objects also move with the eased
+ * camera; objects placed on the screen do not. A jump of more than CUT
+ * pixels, or more than OBJ_LOST frames unseen, starts it again where the
+ * game put it (a new object in the slot); a shorter absence (blinking) is
+ * ridden out.
+ *
  * The playfield is the band below the HUD (native_present_playfield). Its
  * first line moves by one now and then (the HUD split's polling loop): that
  * changes only where the band is drawn. A jump of more than CUT pixels
@@ -37,9 +47,11 @@
 #include "native/native_render.h"
 
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
 
-enum { CUT = 16, CUT_Y = 24, SUB = 8, HIST = 16, LOST = 4 };
+enum { CUT = 16, CUT_Y = 24, SUB = 8, HIST = 16, LOST = 4, OBJ_AVG = 4, OBJ_LOST = 3 };
+static const double OBJ_LAG = 6.0;
 static const int LEVEL_N[] = { 0, 8, 12, 12 };
 static const double LEVEL_T[] = { 0, 3, 3, 4 };
 
@@ -159,6 +171,10 @@ void smooth_frame(bool have, int scrooge_x, int scrooge_y)
     int band = 0, x = 0, y = 0;
     s.margins_ready = false;
     bool on = s.level > 0 && native_present_playfield(&band, &x, &y);
+    if (!on && s.level > 0 && s.known && native_present_playfield_merged(s.band, &x, &y)) {
+        on = true;
+        band = s.band;
+    }
     if (!on) {
         s.have = false;
         if (++s.lost > LOST) {
@@ -306,4 +322,101 @@ void smooth_debug(bool *on, int *x, int *y, int *dx, int *dy, double *shift0, do
     *dy = s.vdy;
     *shift0 = s.have ? s.camera.cam - s.camera.sub[0] : 0;
     *shift1 = s.have ? s.camera.cam - s.camera.x : 0;
+}
+
+/* ---- objects ---- */
+
+typedef struct {
+    bool known, seen, world;
+    int lost, n, head;
+    int x, y;
+    double hx[OBJ_AVG], hy[OBJ_AVG];
+    double ax0, ax1, ay0, ay1;
+} Obj;
+
+static Obj s_obj[SMOOTH_SLOTS];
+
+static double clamp_near(double v, double to, double lag)
+{
+    return v > to + lag ? to + lag : v < to - lag ? to - lag : v;
+}
+
+void smooth_objects(const int *slot, const bool *world, const int *x, const int *y, int count)
+{
+    for (int i = 0; i < SMOOTH_SLOTS; i++) {
+        s_obj[i].seen = false;
+    }
+    for (int i = 0; i < count; i++) {
+        if (slot[i] < 0 || slot[i] >= SMOOTH_SLOTS) {
+            continue;
+        }
+        Obj *o = &s_obj[slot[i]];
+        int dx = x[i] - o->x, dy = y[i] - o->y;
+        if (o->world) {
+            dx = dx > 1024 ? dx - 2048 : dx < -1024 ? dx + 2048 : dx;
+        } else {
+            dx = dx > 128 ? dx - 256 : dx < -128 ? dx + 256 : dx;
+        }
+        dy = dy > 128 ? dy - 256 : dy < -128 ? dy + 256 : dy;
+        const int gap = o->lost + 1;
+        if (!s.have || !o->known || o->world != world[i] || abs(dx) > CUT * gap || abs(dy) > CUT_Y * gap) {
+            memset(o, 0, sizeof *o);
+            o->known = true;
+            o->world = world[i];
+            o->x = x[i];
+            o->y = y[i];
+            o->n = 0;
+        } else {
+            o->x += dx;
+            o->y += dy;
+        }
+        o->seen = true;
+        o->lost = 0;
+        o->hx[o->head] = o->x;
+        o->hy[o->head] = o->y;
+        o->head = (o->head + 1) % OBJ_AVG;
+        if (o->n < OBJ_AVG) {
+            o->n++;
+        }
+        double sx = 0, sy = 0;
+        for (int k = 0; k < o->n; k++) {
+            sx += o->hx[k];
+            sy += o->hy[k];
+        }
+        const bool fresh = o->n == 1;
+        o->ax0 = fresh ? o->x : o->ax1;
+        o->ay0 = fresh ? o->y : o->ay1;
+        o->ax1 = clamp_near(sx / o->n, o->x, OBJ_LAG);
+        o->ay1 = clamp_near(sy / o->n, o->y, OBJ_LAG);
+        o->ax0 = clamp_near(o->ax0, o->x, 2 * OBJ_LAG);
+        o->ay0 = clamp_near(o->ay0, o->y, 2 * OBJ_LAG);
+    }
+    for (int i = 0; i < SMOOTH_SLOTS; i++) {
+        Obj *o = &s_obj[i];
+        if (o->known && !o->seen && ++o->lost > OBJ_LOST) {
+            o->known = false;
+        }
+    }
+}
+
+bool smooth_object_shift(int slot, double p, bool in_between, double *dx, double *dy)
+{
+    *dx = *dy = 0;
+    if (slot < 0 || slot >= SMOOTH_SLOTS || !s.have) {
+        return false;
+    }
+    const Obj *o = &s_obj[slot];
+    if (!o->known || !o->seen) {
+        return false;
+    }
+    const double sx = in_between ? o->ax0 + (o->ax1 - o->ax0) * p : o->ax1;
+    const double sy = in_between ? o->ay0 + (o->ay1 - o->ay0) * p : o->ay1;
+    *dx = sx - o->x;
+    *dy = sy - o->y;
+    if (o->world) {
+        double cx, cy;
+        smooth_shift(p, in_between, &cx, &cy);
+        *dx += cx;
+    }
+    return true;
 }
