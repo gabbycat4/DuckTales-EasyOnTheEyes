@@ -23,6 +23,7 @@ typedef struct {
     int overscan;      /* AppOverscan */
     int clean_split;   /* bool */
     int pacing;        /* AppPacing; applies at the next launch */
+    int rate;          /* AppRate: pictures a second */
     int volume;        /* 0..100 */
 } AppDisplay;
 

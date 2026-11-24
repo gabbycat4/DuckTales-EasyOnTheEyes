@@ -322,6 +322,7 @@ void app_display_get(AppDisplay *out)
     out->overscan = p.overscan;
     out->clean_split = p.clean_split;
     out->pacing = p.pacing;
+    out->rate = p.rate;
     out->volume = s_cfg.volume;
 }
 
@@ -336,6 +337,7 @@ void app_display_set(SDL_Window *win, const AppDisplay *d)
     p.overscan = d->overscan;
     p.clean_split = d->clean_split != 0;
     p.pacing = d->pacing;
+    p.rate = d->rate;
     app_present_set(&p);
     app_present_get(&p);
     bool mode = d->fullscreen != s_cfg.fullscreen, size = d->window_scale != s_cfg.window_scale;

@@ -101,10 +101,20 @@ static void apu_power_on(NaApu *a)
     a->tri_out = 15;
 }
 
+static int s_rate = 48000;
+static double s_speed = 1.0;
+
+void native_audio_set_speed(double factor)
+{
+    s_speed = factor > 0.5 && factor < 2.0 ? factor : 1.0;
+    s.cps = NA_CPU_HZ / (s_rate * s_speed);
+}
+
 void native_audio_reset(int sample_rate)
 {
     memset(&s, 0, sizeof s);
-    s.cps = NA_CPU_HZ / sample_rate;
+    s_rate = sample_rate > 0 ? sample_rate : 48000;
+    s.cps = NA_CPU_HZ / (s_rate * s_speed);
     double dt = 1.0 / sample_rate, pi2 = 2 * 3.14159265358979;
     double rc90 = 1.0 / (pi2 * 90), rc440 = 1.0 / (pi2 * 440), rc14k = 1.0 / (pi2 * 14000);
     s.hp90_a = rc90 / (rc90 + dt);

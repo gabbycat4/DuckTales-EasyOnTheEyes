@@ -71,6 +71,7 @@
 #include "host/ducktales_host.h"
 #include "host/ducktales_sprites.h"
 #include "mods/app_mods.h"
+#include "ui/app_present.h"
 #include "ui/app_ui.h"
 
 #include "cpu6502.h"
@@ -119,6 +120,10 @@ int ducktales_host_main(int argc, char **argv);
  * 1.5 frame periods after the previous one). */
 #define PACE_MAX 200000
 static FILE *s_pace;
+static float *s_pace_pic;
+static long s_pace_pic_n, s_pace_skipped;
+static double s_pace_step_ms;
+static Uint64 s_pace_first, s_pace_last;
 static Uint64 s_split[4]; /* CYC_PACING_LOG: machine, picture, sprites, mods */
 static Uint64 s_pace_prev;
 static float *s_pace_emu, *s_pace_draw, *s_pace_int;
@@ -135,6 +140,7 @@ static void pace_open(void)
         s_pace_emu = (float *)calloc(PACE_MAX, sizeof(float));
         s_pace_draw = (float *)calloc(PACE_MAX, sizeof(float));
         s_pace_int = (float *)calloc(PACE_MAX, sizeof(float));
+        s_pace_pic = (float *)calloc(4 * PACE_MAX, sizeof(float));
         fprintf(s_pace, "# native player pacing log; frame period %.3f ms\n", 1000.0 / FRAME_HZ);
     }
 }
@@ -156,6 +162,29 @@ static void pace_line(long frame, double emu, double audio, double wait, double 
         s_pace_draw[s_pace_n] = (float)draw;
         s_pace_int[s_pace_n] = (float)interval;
         s_pace_n++;
+    }
+}
+
+/* Every picture after the first: how long after the previous one it was
+ * handed over, and how many in-between pictures were skipped. */
+static void pace_picture(long frame, int i, double at, double interval, double draw)
+{
+    if (!s_pace) {
+        return;
+    }
+    fprintf(s_pace, "%ld   picture %d at %+.2f interval %.2f draw %.2f\n", frame, i, at, interval, draw);
+    if (s_pace_pic && s_pace_pic_n < 4 * PACE_MAX && frame > 120) {
+        s_pace_pic[s_pace_pic_n++] = (float)interval;
+    }
+}
+
+static void pace_skip(long frame, int count)
+{
+    if (s_pace) {
+        fprintf(s_pace, "%ld   skipped %d in-between picture%s\n", frame, count, count == 1 ? "" : "s");
+        if (frame > 120) {
+            s_pace_skipped += count;
+        }
     }
 }
 
@@ -196,7 +225,22 @@ static void pace_close(void)
     pace_stat("emu", e, n);
     pace_stat("draw", d, n);
     pace_stat("interval", iv, n);
+    if (s_pace_pic_n) {
+        long late_pics = 0;
+        for (long i = 0; i < s_pace_pic_n; i++) {
+            late_pics += s_pace_pic[i] > 1.5 * s_pace_step_ms;
+        }
+        double secs = (double)(s_pace_last - s_pace_first) / (double)SDL_GetPerformanceFrequency();
+        fprintf(s_pace, "# in-between pictures: %ld shown, %ld skipped, %ld late (> 1.5 x %.2f ms)", s_pace_pic_n,
+                s_pace_skipped, late_pics, s_pace_step_ms);
+        if (secs > 0) {
+            fprintf(s_pace, "; all pictures: %.1f a second", (double)(s_pace_pic_n + n) / secs);
+        }
+        fprintf(s_pace, "\n");
+        pace_stat("pic int", s_pace_pic, s_pace_pic_n);
+    }
     fclose(s_pace);
+    free(s_pace_pic);
     s_pace = NULL;
     free(s_pace_emu);
     free(s_pace_draw);
@@ -862,8 +906,11 @@ static int run_window(bool hidden, bool uncapped, long exit_after, const char *p
     scheduling_begin();
     pace_open();
 
-    const Uint64 freq = SDL_GetPerformanceFrequency(), frame_ticks = (Uint64)((double)freq / FRAME_HZ);
+    const Uint64 freq = SDL_GetPerformanceFrequency();
     Uint64 next = SDL_GetPerformanceCounter(), shown = 0;
+    const char *pace_env = getenv("CYC_PACE_5994");
+    const bool pace_5994 = !(pace_env && pace_env[0] == '0');
+    bool was_slow = false;
     long frames_done = 0, loops = 0;
     int shot = 0;
     bool running = true, prev[CYC_SC_COUNT] = { false };
@@ -918,6 +965,23 @@ static int run_window(bool hidden, bool uncapped, long exit_after, const char *p
         }
         uint8_t buttons[2] = { st.buttons[0], st.buttons[1] };
         app_ui_input(buttons);
+        /* Pictures a second ([Game] PicturesPerSecond). At 240 the console
+         * runs at 59.94 frames a second, so 4 pictures a frame come at
+         * 239.76 Hz, under a 240 Hz display (4 x 60.0988 = 240.4 is over
+         * it); the synth makes 0.26% more samples a frame to match.
+         * CYC_PACE_5994=0 keeps the console's own rate. */
+        const bool unpaced = st.shortcut[CYC_SC_FAST_FORWARD] || uncapped;
+        AppPresentation pres;
+        app_present_get(&pres);
+        const int rate = unpaced ? 60 : app_present_rate_hz(pres.rate);
+        const bool slow = rate >= 240 && pace_5994;
+        const Uint64 frame_ticks = (Uint64)((double)freq / (slow ? 59.94 : FRAME_HZ));
+        native_audio_set_speed(slow ? FRAME_HZ / 59.94 : 1.0);
+        if (slow != was_slow) {
+            printf("[ducktales] window: console paced at %.4f frames a second\n", slow ? 59.94 : FRAME_HZ);
+            fflush(stdout);
+            was_slow = slow;
+        }
         app_ui_frame_begin();
         const Uint64 t_emu0 = SDL_GetPerformanceCounter();
         run_frame(buttons[0], buttons[1]);
@@ -927,35 +991,59 @@ static int run_window(bool hidden, bool uncapped, long exit_after, const char *p
         queue_audio(fast);
         const Uint64 t_audio = SDL_GetPerformanceCounter();
 
-        bool unpaced = fast || uncapped;
-        set_vsync(s_set.vsync && !unpaced);
+        (void)fast;
+        set_vsync(s_set.vsync && !unpaced && rate <= 60);
         Uint64 now = SDL_GetPerformanceCounter();
         if (!unpaced || now - shown >= frame_ticks) {
-            if (!unpaced && now < next) {
-                Uint32 wait_ms = (Uint32)((next - now) * 1000 / freq);
-                if (wait_ms > 1) {
-                    SDL_Delay(wait_ms - 1);
+            /* The frame's pictures, each held to its even slot of the
+             * frame: next, next + step, ... An in-between picture whose slot
+             * has passed by more than half a step is skipped (a late frame
+             * catches up instead of pushing every later picture back). */
+            const int count = rate / 60;
+            const Uint64 step = frame_ticks / (Uint64)count;
+            const double ms = 1000.0 / (double)freq;
+            s_pace_step_ms = (double)step * ms;
+            for (int i = 0; i < count; i++) {
+                const Uint64 due = next + (Uint64)i * step;
+                now = SDL_GetPerformanceCounter();
+                if (i > 0 && now > due + step / 2) {
+                    pace_skip(frames_done, count - i);
+                    break;
                 }
-                while (SDL_GetPerformanceCounter() < next) {
+                if (!unpaced && now < due) {
+                    Uint32 wait_ms = (Uint32)((due - now) * 1000 / freq);
+                    if (wait_ms > 1) {
+                        SDL_Delay(wait_ms - 1);
+                    }
+                    while (SDL_GetPerformanceCounter() < due) {
+                    }
                 }
+                const Uint64 t_draw0 = SDL_GetPerformanceCounter();
+                show();
+                if (i == 0 && present_out && present_every > 0 && loops % present_every == 0) {
+                    present_shot(present_out, frames_done);
+                }
+                const Uint64 t_draw1 = SDL_GetPerformanceCounter();
+                SDL_RenderPresent(s_ren);
+                const Uint64 prev_shown = shown;
+                shown = SDL_GetPerformanceCounter();
+                if (s_pace && !unpaced) {
+                    if (!s_pace_first && frames_done > 120) {
+                        s_pace_first = t_draw1;
+                    }
+                    s_pace_last = t_draw1;
+                    if (i == 0) {
+                        pace_line(frames_done, (double)(t_emu1 - t_emu0) * ms, (double)(t_audio - t_emu1) * ms,
+                                  (double)(t_draw0 - t_audio) * ms, (double)(t_draw1 - t_draw0) * ms,
+                                  (double)(shown - t_draw1) * ms, (double)((long long)(t_draw1 - next)) * ms,
+                                  prev_shown ? (double)(t_draw1 - s_pace_prev) * ms : 0.0, s_vsync_active);
+                    } else {
+                        pace_picture(frames_done, i, (double)((long long)(t_draw1 - next)) * ms,
+                                     (double)(t_draw1 - s_pace_prev) * ms, (double)(t_draw1 - t_draw0) * ms);
+                    }
+                }
+                s_pace_prev = t_draw1;
             }
-            const Uint64 t_draw0 = SDL_GetPerformanceCounter();
-            show();
-            if (present_out && present_every > 0 && loops % present_every == 0) {
-                present_shot(present_out, frames_done);
-            }
-            const Uint64 t_draw1 = SDL_GetPerformanceCounter();
-            SDL_RenderPresent(s_ren);
-            const Uint64 prev_shown = shown;
-            shown = SDL_GetPerformanceCounter();
-            if (s_pace && !unpaced) {
-                const double ms = 1000.0 / (double)freq;
-                pace_line(frames_done, (double)(t_emu1 - t_emu0) * ms, (double)(t_audio - t_emu1) * ms,
-                          (double)(t_draw0 - t_audio) * ms, (double)(t_draw1 - t_draw0) * ms,
-                          (double)(shown - t_draw1) * ms, (double)((long long)(t_draw1 - next)) * ms,
-                          prev_shown ? (double)(t_draw1 - s_pace_prev) * ms : 0.0, s_vsync_active);
-            }
-            s_pace_prev = t_draw1;
         }
         loops++;
         next += frame_ticks;

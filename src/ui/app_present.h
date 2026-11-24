@@ -52,13 +52,25 @@ typedef enum {
     APP_OVERSCAN_COUNT
 } AppOverscan;
 
+typedef enum {
+    APP_RATE_60,
+    APP_RATE_120,
+    APP_RATE_180,
+    APP_RATE_240,
+    APP_RATE_COUNT
+} AppRate;
+
 typedef struct {
     int pacing;      /* AppPacing; applies at the next launch */
     int clean_split; /* bool */
     int overscan;    /* AppOverscan */
     int pixels;      /* AppPixels */
     int aspect;      /* AppAspect */
+    int rate;        /* AppRate: pictures a second; above 60 the steady hold is used, VSync off */
 } AppPresentation;
+
+/* Pictures a second for an AppRate: 60, 120, 180 or 240. */
+int app_present_rate_hz(int rate);
 
 void app_present_get(AppPresentation *out);
 void app_present_set(const AppPresentation *p);

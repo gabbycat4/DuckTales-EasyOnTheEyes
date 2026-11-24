@@ -37,13 +37,14 @@
 #include <stdlib.h>
 #include <string.h>
 
-static AppPresentation s_p = { APP_PACING_AUTO, 1, APP_OVERSCAN_OFF, APP_PIXELS_NEAREST, APP_ASPECT_SQUARE };
+static AppPresentation s_p = { APP_PACING_AUTO, 1, APP_OVERSCAN_OFF, APP_PIXELS_NEAREST, APP_ASPECT_SQUARE, APP_RATE_60 };
 
 static const char *const PACING[] = { "auto", "vsync", "steady" };
 static const char *const SPLIT[] = { "original", "clean" };
 static const char *const OVERSCAN[] = { "off", "top-bottom", "all" };
 static const char *const PIXELS[] = { "nearest", "sharp", "smooth" };
 static const char *const ASPECT[] = { "square", "8:7" };
+static const char *const RATE[] = { "60", "120", "180", "240" };
 
 static const struct {
     const char *key;
@@ -56,6 +57,7 @@ static const struct {
     { "Overscan", OVERSCAN, APP_OVERSCAN_COUNT, offsetof(AppPresentation, overscan) },
     { "Pixels", PIXELS, APP_PIXELS_COUNT, offsetof(AppPresentation, pixels) },
     { "PixelAspect", ASPECT, APP_ASPECT_COUNT, offsetof(AppPresentation, aspect) },
+    { "PicturesPerSecond", RATE, APP_RATE_COUNT, offsetof(AppPresentation, rate) },
 };
 
 #define KEY_COUNT (sizeof KEYS / sizeof KEYS[0])
@@ -102,6 +104,11 @@ void app_present_write(FILE *f)
     for (size_t k = 0; k < KEY_COUNT; k++) {
         fprintf(f, "%s = %s\n", KEYS[k].key, KEYS[k].names[*field(&s_p, k)]);
     }
+}
+
+int app_present_rate_hz(int rate)
+{
+    return rate <= APP_RATE_60 ? 60 : rate >= APP_RATE_240 ? 240 : 60 * (rate + 1);
 }
 
 bool app_present_vsync_for(int pacing, int refresh_hz)

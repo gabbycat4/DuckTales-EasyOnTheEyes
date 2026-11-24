@@ -204,6 +204,7 @@ void page_graphics(SDL_Window *win)
     static const char *const OVERSCAN[] = { "Off", "Top and bottom", "All edges" };
     static const char *const SPLIT[] = { "Original", "Clean" };
     static const char *const PACING[] = { "Auto", "VSync", "Steady" };
+    static const char *const RATES[] = { "60", "120", "180", "240" };
     AppDisplay d;
     app_display_get(&d);
     const AppDisplay was = d;
@@ -237,6 +238,11 @@ void page_graphics(SDL_Window *win)
     ui::combo("Frame pacing", &d.pacing, PACING, APP_PACING_COUNT, app_vsync_pending() ? ui::restart_to_apply : nullptr,
               "How pictures reach the display. Auto uses VSync on displays up to 70 Hz and a steady hold "
               "above that; VSync and Steady force one. Applies at the next launch.");
+    ui::combo("Pictures per second", &d.rate, RATES, APP_RATE_COUNT, nullptr,
+              "Pictures shown for each game frame: 60 is the console's rate; 120, 180 and 240 are for fast "
+              "displays (choose your display's refresh rate or a divisor of it). Above 60 the picture is held "
+              "steady without VSync. At 240 the game runs at 59.94 frames a second (0.26% slower) so the "
+              "pictures fit a 240 Hz display.");
     if (std::memcmp(&d, &was, sizeof d)) {
         app_display_set(win, &d);
     }

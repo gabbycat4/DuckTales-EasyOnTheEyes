@@ -30,6 +30,12 @@ extern "C" {
 
 /* Power-on: every register 0, silence, samples at sample_rate Hz. */
 void native_audio_reset(int sample_rate);
+/* Samples per console second, as a factor of the sample rate (1.0 normally).
+ * The window runs the console at 59.94 frames a second at 240 pictures, so
+ * it asks for 60.0988 / 59.94 times as many samples per frame: the sound
+ * stays in step with the slower frames, 0.26% lower in pitch. Kept across
+ * native_audio_reset. */
+void native_audio_set_speed(double factor);
 
 /* The native player's extra voices (native_voices.h, docs/audio.md "Extra
  * voices"), both off until set; they read the driver's RAM and the ROM after
