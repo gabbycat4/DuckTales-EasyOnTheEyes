@@ -21,3 +21,6 @@ keybinds.ini
 
 # Python caches from tools/
 __pycache__/
+
+# Pacing logs (CYC_PACING_LOG)
+pacing*.log

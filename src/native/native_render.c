@@ -192,6 +192,84 @@ static unsigned sprite_pixel(const LineSprite *sp, int x)
     return ((sp->lo >> bit) & 1) | (((sp->hi >> bit) & 1) << 1);
 }
 
+/* One line without source tracking, the same pixels as the per-pixel path
+ * below: the background tile is fetched once per 8 columns, and the sprites
+ * are drawn into a line buffer from the back of the list to the front, so the
+ * first listed opaque sprite at a column is the one left (it decides, behind
+ * the background or not, as on the PPU). */
+static void draw_line_fast(const NvVideo *v, const Line *l, int n, const LineSprite *sprites, uint16_t *out,
+                           uint8_t *opaque, uint16_t emphasis, uint8_t grey)
+{
+    const NvSegment *s = l->s;
+    const uint8_t mask = s->mask;
+    uint8_t addr[NV_WIDTH];
+    if (mask & NV_MASK_BG) {
+        int x = 0;
+        if (!(mask & NV_MASK_BG_LEFT)) {
+            memset(addr, 0, 8);
+            x = 8;
+        }
+        unsigned key = ~0u, lo = 0, hi = 0, pal4 = 0;
+        for (; x < NV_WIDTH; x++) {
+            int k = x >= l->split;
+            unsigned bx = (unsigned)((k ? s->split_x : s->x) + x) & 511;
+            unsigned tile_key = (bx >> 3) | (unsigned)k << 7;
+            if (tile_key != key) {
+                key = tile_key;
+                unsigned coarse_x = (bx >> 3) & 31, coarse_y = l->coarse_y[k], nt = (bx >> 8) | l->nt_y[k] << 1;
+                uint8_t tile = nametable(v, nt, coarse_y * 32 + coarse_x);
+                uint16_t pattern = (uint16_t)(l->bg_table + tile * 16 + l->fine_y[k]);
+                lo = v->chr[pattern];
+                hi = v->chr[pattern + 8];
+                uint8_t attr = nametable(v, nt, 0x3C0 + (coarse_y >> 2) * 8 + (coarse_x >> 2));
+                pal4 = ((attr >> (((coarse_y & 2) << 1) | (coarse_x & 2))) & 3) << 2;
+            }
+            unsigned bit = 7 - (bx & 7);
+            unsigned color = ((lo >> bit) & 1) | (((hi >> bit) & 1) << 1);
+            addr[x] = (uint8_t)(color ? pal4 | color : 0);
+        }
+    } else {
+        memset(addr, 0, sizeof addr);
+    }
+    if (opaque) {
+        for (int x = 0; x < NV_WIDTH; x++) {
+            opaque[x] = addr[x] != 0;
+        }
+    }
+    if (n) {
+        uint8_t spr[NV_WIDTH + 8];
+        memset(spr, 0, sizeof spr);
+        for (int i = n - 1; i >= 0; i--) {
+            const LineSprite *sp = &sprites[i];
+            if (sp->x >= NV_WIDTH || sp->x <= -8) {
+                continue;
+            }
+            const bool flip = (sp->attr & 0x40) != 0;
+            const uint8_t base = (uint8_t)(0x10 | (sp->attr & 3) << 2 | (sp->attr & 0x20 ? 0x80 : 0));
+            for (int c = 0; c < 8; c++) {
+                int x = sp->x + c;
+                if (x < 0 || x >= NV_WIDTH) {
+                    continue;
+                }
+                int bit = flip ? c : 7 - c;
+                unsigned sc = ((sp->lo >> bit) & 1) | (((sp->hi >> bit) & 1) << 1);
+                if (sc) {
+                    spr[x] = (uint8_t)(base | sc);
+                }
+            }
+        }
+        for (int x = (mask & NV_MASK_SPRITE_LEFT) ? 0 : 8; x < NV_WIDTH; x++) {
+            uint8_t p = spr[x];
+            if (p && (!addr[x] || !(p & 0x80))) {
+                addr[x] = (uint8_t)(p & 0x1F);
+            }
+        }
+    }
+    for (int x = 0; x < NV_WIDTH; x++) {
+        out[x] = (uint16_t)((v->palette[addr[x]] & grey) | emphasis);
+    }
+}
+
 static void draw_lines(const NvVideo *v, const NvRenderOptions *o, int first, int last, uint16_t *index,
                        uint8_t *bg_opaque, NvSource *source)
 {
@@ -224,6 +302,10 @@ static void draw_lines(const NvVideo *v, const NvRenderOptions *o, int first, in
             continue;
         }
         int n = y > 0 && (mask & NV_MASK_SPRITES) ? line_sprites(v, o, &l, y, sprites) : 0;
+        if (!src) {
+            draw_line_fast(v, &l, n, sprites, out, opaque, emphasis, grey);
+            continue;
+        }
         for (int x = 0; x < NV_WIDTH; x++) {
             NvSource from;
             unsigned pal, color = bg_pixel(v, &l, x, &pal, src ? &from : NULL);
